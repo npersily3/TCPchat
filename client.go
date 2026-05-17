@@ -31,7 +31,7 @@ func writeMessage(conn net.Conn, data []byte) {
 	}
 }
 
-func client_main() {
+func clientMain() {
 
 	conn, err := net.Dial("tcp", ":1000")
 
