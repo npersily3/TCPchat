@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/gob"
 	"net"
 )
@@ -101,24 +100,17 @@ func perClientWriter(userId uint32) {
 func handleConn(conn net.Conn) {
 
 	var clientInfo ClientInfo
-	var rawData []byte
-
-	rawData = make([]byte, 1024)
+	var msg Message
+	decoder := gob.NewDecoder(conn)
 
 	//read in the starter to data the client sends
-	n, err := conn.Read(rawData)
+	err := decoder.Decode(&msg)
 
 	if err != nil {
 		panic(err)
 	}
-	// you only care about the data that it sends
-	rawData = rawData[:n]
 
-	clientInfo.conn = conn
-
-	// read the first four bytes which the client agrees have to be the id
-	id := binary.BigEndian.Uint32(rawData[:4])
-	clientInfo.uniqueId = id
+	clientInfo.uniqueId = msg.senderId
 
 	_, ok := serverUsers[clientInfo.uniqueId]
 
@@ -130,7 +122,8 @@ func handleConn(conn net.Conn) {
 		//TODO find a way if I can send previous messages
 
 		// initialize user name and channel, then add to hashmap
-		clientInfo.userName = string(rawData[4:n])
+		clientInfo.conn = conn
+		clientInfo.userName = msg.contents
 		clientInfo.channel = make(chan Message)
 		serverUsers[clientInfo.uniqueId] = clientInfo
 
@@ -145,8 +138,8 @@ func handleConn(conn net.Conn) {
 	}
 
 	// now that the thread is initialized, we can launch the two new goroutines and exit
-	go perClientWriter(id)
-	go perClientReader(id)
+	go perClientWriter(clientInfo.uniqueId)
+	go perClientReader(clientInfo.uniqueId)
 }
 
 // Constantly listens for new users, and initializes them
@@ -162,6 +155,8 @@ func newUserListener(ln net.Listener) {
 			println(err)
 			return
 		}
+		println("accepted connection")
+
 		go handleConn(conn)
 
 	}

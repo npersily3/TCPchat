@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
+	"os"
+	"strconv"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -76,7 +79,9 @@ func sendMessage() {
 	var buffer bytes.Buffer
 	encoder := gob.NewEncoder(&buffer)
 
-	senderChannel <- clientUsers[myID]
+	initialString := strconv.Itoa(int(myID)) + clientUsers[myID]
+	senderChannel <- initialString
+	log.Printf(initialString)
 
 	for {
 		messageContents, ok := <-senderChannel
@@ -117,6 +122,9 @@ var receiverChannel chan Message
 var clientConn net.Conn
 
 func initClient() {
+
+	f, _ := os.OpenFile("debug.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	log.SetOutput(f)
 
 	clientUsers = make(map[uint32]string)
 	myID = rand.Uint32()
