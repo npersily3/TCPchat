@@ -41,13 +41,13 @@ func messageManager() {
 
 		// if there is a message
 		if ok {
-			senderId := msg.senderId
+			senderId := msg.SenderId
 
 			userName, isInitialized := clientUsers[senderId]
 
 			// initialize a user, there should be no other message
 			if !isInitialized {
-				name := msg.contents
+				name := msg.Contents
 				clientUsers[senderId] = name
 
 				//GUI specific thing
@@ -59,7 +59,7 @@ func messageManager() {
 				continue
 			}
 			app.QueueUpdateDraw(func() {
-				fmt.Fprintf(msgView, "[green]%s[-]: %s\n", userName, msg.contents)
+				fmt.Fprintf(msgView, "[green]%s[-]: %s\n", userName, msg.Contents)
 			})
 
 			//print(userName)
@@ -81,7 +81,6 @@ func sendMessage() {
 
 	initialString := strconv.Itoa(int(myID)) + clientUsers[myID]
 	senderChannel <- initialString
-	log.Printf(initialString)
 
 	for {
 		messageContents, ok := <-senderChannel
@@ -89,8 +88,8 @@ func sendMessage() {
 		// if the user sends a message
 		if ok {
 			message := Message{
-				senderId: myID,
-				contents: messageContents,
+				SenderId: myID,
+				Contents: messageContents,
 			}
 
 			// convert string pointer in message to real data
@@ -129,8 +128,8 @@ func initClient() {
 	clientUsers = make(map[uint32]string)
 	myID = rand.Uint32()
 
-	senderChannel = make(chan string)
-	receiverChannel = make(chan Message)
+	senderChannel = make(chan string, 16)
+	receiverChannel = make(chan Message, 16)
 
 	var name string
 
@@ -182,22 +181,6 @@ func initGUI() {
 	layout = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(msgView, 0, 1, false).
 		AddItem(inputField, 3, 0, true)
-}
-
-func getUserInput() {
-	for {
-		var input string
-		println("What do you want to say")
-		_, err := fmt.Scanln(&input)
-		if err != nil {
-			panic(err)
-		}
-
-		//TODO make a special code that quits if neccesary
-
-		senderChannel <- input
-
-	}
 }
 
 func clientMain() {

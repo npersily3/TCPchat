@@ -17,8 +17,8 @@ type ClientInfo struct {
 
 // simple message and sender structs
 type Message struct {
-	senderId uint32
-	contents string
+	SenderId uint32
+	Contents string
 }
 
 // global hashmap for easy lookup of ids
@@ -49,12 +49,12 @@ func perClientReader(userId uint32) {
 
 		// allocate a space where the message can live to prevent over writing
 		//TODO this logic can be simplified
-		contents := make([]byte, len(msg.contents))
-		copy(contents, msg.contents)
+		contents := make([]byte, len(msg.Contents))
+		copy(contents, msg.Contents)
 
 		message := Message{
-			senderId: userId,
-			contents: string(contents),
+			SenderId: userId,
+			Contents: string(contents),
 		}
 
 		// push the message into the channel to be read
@@ -110,28 +110,28 @@ func handleConn(conn net.Conn) {
 		panic(err)
 	}
 
-	clientInfo.uniqueId = msg.senderId
+	clientInfo.uniqueId = msg.SenderId
 
 	_, ok := serverUsers[clientInfo.uniqueId]
+	println("I am here")
 
 	// if we exist in the hashmap (have been online before
 	if ok {
 
 		// if  we are a new user,
 	} else {
-		//TODO find a way if I can send previous messages
 
 		// initialize user name and channel, then add to hashmap
 		clientInfo.conn = conn
-		clientInfo.userName = msg.contents
-		clientInfo.channel = make(chan Message)
+		clientInfo.userName = msg.Contents
+		clientInfo.channel = make(chan Message, 16)
 		serverUsers[clientInfo.uniqueId] = clientInfo
 
 		// send a message to everyone of our username and id, since this message will inevitably be sent back to us
 		// it also serves as an acknowledgment
 		initialMessage := Message{
-			senderId: clientInfo.uniqueId,
-			contents: clientInfo.userName,
+			SenderId: clientInfo.uniqueId,
+			Contents: clientInfo.userName,
 		}
 		globalChannel <- initialMessage
 
@@ -153,7 +153,6 @@ func newUserListener(ln net.Listener) {
 		if err != nil {
 			// assume an error mean the server is over
 			println(err)
-			return
 		}
 		println("accepted connection")
 
@@ -182,7 +181,7 @@ func serverMain() {
 	}
 	// initialize global stuff
 	serverUsers = make(map[uint32]ClientInfo)
-	globalChannel = make(chan Message)
+	globalChannel = make(chan Message, 128)
 
 	// initialize all new users
 	go newUserListener(ln)
