@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/gob"
 	"fmt"
 	"log"
@@ -76,8 +75,8 @@ func messageManager() {
 func sendMessage() {
 
 	// initialize
-	var buffer bytes.Buffer
-	encoder := gob.NewEncoder(&buffer)
+
+	encoder := gob.NewEncoder(clientConn)
 
 	initialString := strconv.Itoa(int(myID)) + clientUsers[myID]
 	senderChannel <- initialString
@@ -98,18 +97,7 @@ func sendMessage() {
 			if err != nil {
 				panic(err)
 			}
-
-			// send it over the net
-			_, err = clientConn.Write(buffer.Bytes())
-
-			if err != nil {
-				panic(err)
-			}
-
-			// reset buffer
-			buffer.Reset()
 		}
-
 	}
 }
 

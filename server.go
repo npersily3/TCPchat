@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/gob"
 	"net"
 )
@@ -28,13 +27,8 @@ var serverUsers = map[uint32]ClientInfo{}
 var globalChannel chan Message
 
 // This is a go routine that reads messages in and pushes them up to a big channel
-func perClientReader(userId uint32) {
+func perClientReader(userId uint32, decoder *gob.Decoder) {
 
-	info := serverUsers[userId]
-	decoder := gob.NewDecoder(info.conn)
-
-	// repeat until conn is closed
-	//TODO handle if CONN is closed
 	for {
 
 		// wait for a message on the other side of the network
@@ -43,8 +37,7 @@ func perClientReader(userId uint32) {
 		err := decoder.Decode(&msg)
 
 		if err != nil {
-			println(err.Error())
-			return
+			panic(err)
 		}
 
 		// allocate a space where the message can live to prevent over writing
@@ -66,32 +59,24 @@ func perClientReader(userId uint32) {
 func perClientWriter(userId uint32) {
 
 	// initialize
-	var buffer bytes.Buffer
+
 	info := serverUsers[userId]
-	encoder := gob.NewEncoder(&buffer)
+	encoder := gob.NewEncoder(serverUsers[userId].conn)
 
 	for {
-		// recieve a message
+		// receive a message
 		message, ok := <-info.channel
 
 		if ok {
 
-			// convert pointers to real data
 			err := encoder.Encode(message)
 
 			if err != nil {
 				panic(err)
 			}
 
-			// send it over the net
-			_, err = info.conn.Write(buffer.Bytes())
-
-			if err != nil {
-				panic(err)
-			}
-
 			// reset buffer
-			buffer.Reset()
+
 		}
 	}
 }
@@ -113,7 +98,6 @@ func handleConn(conn net.Conn) {
 	clientInfo.uniqueId = msg.SenderId
 
 	_, ok := serverUsers[clientInfo.uniqueId]
-	println("I am here")
 
 	// if we exist in the hashmap (have been online before
 	if ok {
@@ -139,7 +123,7 @@ func handleConn(conn net.Conn) {
 
 	// now that the thread is initialized, we can launch the two new goroutines and exit
 	go perClientWriter(clientInfo.uniqueId)
-	go perClientReader(clientInfo.uniqueId)
+	go perClientReader(clientInfo.uniqueId, decoder)
 }
 
 // Constantly listens for new users, and initializes them
@@ -152,9 +136,8 @@ func newUserListener(ln net.Listener) {
 
 		if err != nil {
 			// assume an error mean the server is over
-			println(err)
+			panic(err)
 		}
-		println("accepted connection")
 
 		go handleConn(conn)
 
