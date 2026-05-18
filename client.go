@@ -1,81 +1,153 @@
 package main
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
+	"math/rand"
 	"net"
 )
 
-func listen(conn net.Conn) {
+func receiveMessage() {
 
+	decoder := gob.NewDecoder(clientConn)
+
+	for {
+		// recieve a message
+		var msg Message
+
+		err := decoder.Decode(&msg)
+
+		if err != nil {
+			println(err.Error())
+			return
+		}
+
+		receiverChannel <- msg
+	}
 }
 
-func readMessage(conn net.Conn) {
-	message := make([]byte, 1024)
+func messageManager() {
+	for {
+		msg := <-receiverChannel
 
-	numbytes, err := conn.Read(message)
+		senderId := msg.senderId
+
+		userName, ok := clientUsers[senderId]
+
+		// initialize a user
+		if !ok {
+			name := msg.contents
+			clientUsers[senderId] = name
+			return
+		}
+
+		print(userName)
+		println(":  " + msg.contents)
+
+		//TODO make a gui to interface with that prints out messages
+		//if sender Id = my sender Id think of it as an acknowledgment and update status
+	}
+}
+
+func sendMessage() {
+
+	// initialize
+	var buffer bytes.Buffer
+	encoder := gob.NewEncoder(&buffer)
+
+	for {
+		messageContents, ok := <-senderChannel
+
+		if ok {
+			message := Message{
+				senderId: myID,
+				contents: messageContents,
+			}
+
+			// convert pointers to real data
+			err := encoder.Encode(message)
+
+			if err != nil {
+				panic(err)
+			}
+
+			// send it over the net
+			_, err = clientConn.Write(buffer.Bytes())
+
+			if err != nil {
+				panic(err)
+			}
+
+			// reset buffer
+			buffer.Reset()
+		}
+
+	}
+}
+
+var clientUsers map[uint32]string
+var myID uint32
+var senderChannel chan string
+var receiverChannel chan Message
+
+var clientConn net.Conn
+
+func initClient() {
+
+	clientUsers = make(map[uint32]string)
+	myID = rand.Uint32()
+
+	senderChannel = make(chan string)
+	receiverChannel = make(chan Message)
+
+	var name string
+
+	println("What is your username")
+
+	_, err := fmt.Scanln(&name)
 
 	if err != nil {
 		panic(err)
 	}
 
-	println(string(message[:numbytes]))
-}
+	clientUsers[myID] = name
 
-func writeMessage(conn net.Conn, data []byte) {
-	n, err := conn.Write(data)
-	if err != nil {
-		panic(err)
-	}
-	if n != len(data) {
-		panic("short write")
-	}
-}
-
-func clientMain() {
-
-	conn, err := net.Dial("tcp", ":1000")
+	clientConn, err = net.Dial("tcp", ":1000")
 
 	for {
 		if err != nil {
-			conn, err = net.Dial("tcp", ":1000")
+			clientConn, err = net.Dial("tcp", ":1000")
 		} else {
 			break
 		}
 	}
 
-	message := make([]byte, 1024)
+	return
+}
 
-	// wait until this client is initialized in the server
+func getUserInput() {
 	for {
-		n, err := conn.Read(message)
-
-		if err != nil {
-			panic(err)
-		}
-		if string(message[:n]) == "initialized" {
-			break
-		}
-	}
-
-	go readMessage(conn)
-
-	for {
-		println("Enter a message")
-
-		length, err := fmt.Scanln(&message)
-
+		var input string
+		println("What do you want to say")
+		_, err := fmt.Scanln(&input)
 		if err != nil {
 			panic(err)
 		}
 
-		writeMessage(conn, message[:length])
+		//TODO make a special code that quits if neccesary
+
+		senderChannel <- input
 
 	}
+}
 
-	err = conn.Close()
+func clientMain() {
 
-	if err != nil {
-		println(err.Error())
-	}
+	// why is this not compiling
+	initClient()
+	go receiveMessage()
+	go sendMessage()
+	getUserInput()
 
 }

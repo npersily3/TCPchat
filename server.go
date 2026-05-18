@@ -23,33 +23,35 @@ type Message struct {
 }
 
 // global hashmap for easy lookup of ids
-var users = map[uint32]ClientInfo{}
+var serverUsers = map[uint32]ClientInfo{}
 
-// channel for all users to push messages
+// channel for all serverUsers to push messages
 var globalChannel chan Message
 
 // This is a go routine that reads messages in and pushes them up to a big channel
 func perClientReader(userId uint32) {
 
-	info := users[userId]
-	messageBuffer := make([]byte, 1024)
+	info := serverUsers[userId]
+	decoder := gob.NewDecoder(info.conn)
 
 	// repeat until conn is closed
 	//TODO handle if CONN is closed
 	for {
 
 		// wait for a message on the other side of the network
-		messageLength, err := info.conn.Read(messageBuffer)
+		var msg Message
 
-		//TODO you will likely have to use the gob decoder to decode messages into their structs
+		err := decoder.Decode(&msg)
 
 		if err != nil {
-			panic(err)
+			println(err.Error())
+			return
 		}
 
 		// allocate a space where the message can live to prevent over writing
-		contents := make([]byte, messageLength)
-		copy(contents, messageBuffer[:messageLength])
+		//TODO this logic can be simplified
+		contents := make([]byte, len(msg.contents))
+		copy(contents, msg.contents)
 
 		message := Message{
 			senderId: userId,
@@ -66,7 +68,7 @@ func perClientWriter(userId uint32) {
 
 	// initialize
 	var buffer bytes.Buffer
-	info := users[userId]
+	info := serverUsers[userId]
 	encoder := gob.NewEncoder(&buffer)
 
 	for {
@@ -116,7 +118,7 @@ func handleConn(conn net.Conn) {
 	id := binary.BigEndian.Uint32(rawData[:4])
 	clientInfo.uniqueId = id
 
-	_, ok := users[clientInfo.uniqueId]
+	_, ok := serverUsers[clientInfo.uniqueId]
 
 	// if we exist in the hashmap (have been online before
 	if ok {
@@ -128,7 +130,7 @@ func handleConn(conn net.Conn) {
 		// initialize user name and channel, then add to hashmap
 		clientInfo.userName = string(rawData[4:n])
 		clientInfo.channel = make(chan Message)
-		users[clientInfo.uniqueId] = clientInfo
+		serverUsers[clientInfo.uniqueId] = clientInfo
 
 		// send a message to everyone of our username and id, since this message will inevitably be sent back to us
 		// it also serves as an acknowledgment
@@ -146,14 +148,17 @@ func handleConn(conn net.Conn) {
 }
 
 // Constantly listens for new users, and initializes them
+
 func newUserListener(ln net.Listener) {
 
-	//TODO see if this is always spin or something else
+	// FUTURE projects (rate limiter)
 	for {
 		conn, err := ln.Accept()
 
 		if err != nil {
-			panic(err)
+			// assume an error mean the server is over
+			println(err)
+			return
 		}
 		go handleConn(conn)
 
@@ -166,7 +171,7 @@ func sendMessageToEveryOne(message Message) {
 	// iterate through every channel and push the message for their own go routines to handle
 	// we do not care about resending the message to sender
 	// it actually works in our favor as a form of acknowledgment
-	for _, value := range users {
+	for _, value := range serverUsers {
 		value.channel <- message
 	}
 }
@@ -179,7 +184,7 @@ func serverMain() {
 		panic(err)
 	}
 	// initialize global stuff
-	users = make(map[uint32]ClientInfo)
+	serverUsers = make(map[uint32]ClientInfo)
 	globalChannel = make(chan Message)
 
 	// initialize all new users
