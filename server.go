@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/gob"
+	"fmt"
 	"net"
+	"strconv"
 )
 
 type ClientInfo struct {
@@ -81,6 +83,28 @@ func perClientWriter(userId uint32) {
 	}
 }
 
+func getOthersOnline() string {
+
+	list := ""
+
+	var length int
+
+	// for every user
+	for key, value := range serverUsers {
+
+		// if a user is still online
+		if value.conn != nil {
+			list += strconv.Itoa(int(key))
+			length = len(value.userName)
+			list += strconv.Itoa(length)
+			list += value.userName
+		}
+	}
+
+	return list
+
+}
+
 // handles a new connection to the server
 func handleConn(conn net.Conn) {
 
@@ -95,20 +119,34 @@ func handleConn(conn net.Conn) {
 		panic(err)
 	}
 
+	fmt.Printf("firstMessage: %+v\n", msg)
+
 	clientInfo.uniqueId = msg.SenderId
 
-	_, ok := serverUsers[clientInfo.uniqueId]
+	oldClientInfo, ok := serverUsers[clientInfo.uniqueId]
 
 	// if we exist in the hashmap (have been online before
 	if ok {
-
+		oldClientInfo.conn = conn
 		// if  we are a new user,
 	} else {
+
+		// before we add ourself lets get all other users
+		otherActiveUsers := getOthersOnline()
 
 		// initialize user name and channel, then add to hashmap
 		clientInfo.conn = conn
 		clientInfo.userName = msg.Contents
 		clientInfo.channel = make(chan Message, 16)
+
+		// send back the current list of users
+		// this line has to be in this exact location, because we need the channel to exist, but we cannot be in the hashmap yet, so there is no race condtion
+		// this message will always be the first one recieved back
+		clientInfo.channel <- Message{
+			SenderId: clientInfo.uniqueId,
+			Contents: otherActiveUsers,
+		}
+
 		serverUsers[clientInfo.uniqueId] = clientInfo
 
 		// send a message to everyone of our username and id, since this message will inevitably be sent back to us
@@ -118,6 +156,8 @@ func handleConn(conn net.Conn) {
 			Contents: clientInfo.userName,
 		}
 		globalChannel <- initialMessage
+
+		// send a message back of all the current users ids->name
 
 	}
 

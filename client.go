@@ -35,6 +35,44 @@ func receiveMessage() {
 
 // pull messages off of the channel and prints them out
 func messageManager() {
+
+	firstMessage := <-receiverChannel
+
+	if firstMessage.SenderId != myID {
+		panic("Sender ID mismatch on first message")
+	}
+
+	index := 0
+
+	contents := firstMessage.Contents
+
+	for {
+
+		// read in the first byte
+		id, err := strconv.Atoi(contents[index : index+4])
+		index += 4
+
+		if err != nil {
+			if err.Error() == "EOF" {
+				break
+			} else {
+				panic(err)
+			}
+		}
+
+		length, err := strconv.Atoi(contents[index : index+4])
+
+		if err != nil {
+			panic(err.Error())
+		}
+
+		index += 4
+		name := contents[index : index+length]
+
+		clientUsers[uint32(id)] = name
+
+	}
+
 	for {
 		msg, ok := <-receiverChannel
 
@@ -78,8 +116,8 @@ func sendMessage() {
 
 	encoder := gob.NewEncoder(clientConn)
 
-	initialString := strconv.Itoa(int(myID)) + clientUsers[myID]
-	senderChannel <- initialString
+	//print the user name first for the servers hashmap
+	senderChannel <- clientUsers[myID]
 
 	for {
 		messageContents, ok := <-senderChannel
