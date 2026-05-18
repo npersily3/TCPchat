@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 )
 
+// Recieves message from server, decodes it, and pushes it to the channel
 func receiveMessage() {
 
 	decoder := gob.NewDecoder(clientConn)
@@ -27,45 +31,64 @@ func receiveMessage() {
 	}
 }
 
+// pull messages off of the channel and prints them out
 func messageManager() {
 	for {
-		msg := <-receiverChannel
+		msg, ok := <-receiverChannel
 
-		senderId := msg.senderId
+		// if there is a message
+		if ok {
+			senderId := msg.senderId
 
-		userName, ok := clientUsers[senderId]
+			userName, isInitialized := clientUsers[senderId]
 
-		// initialize a user
-		if !ok {
-			name := msg.contents
-			clientUsers[senderId] = name
-			return
+			// initialize a user, there should be no other message
+			if !isInitialized {
+				name := msg.contents
+				clientUsers[senderId] = name
+
+				//GUI specific thing
+				{
+					app.QueueUpdateDraw(func() {
+						fmt.Fprintf(msgView, "[yellow]%s joined[-]\n", name)
+					})
+				}
+				continue
+			}
+			app.QueueUpdateDraw(func() {
+				fmt.Fprintf(msgView, "[green]%s[-]: %s\n", userName, msg.contents)
+			})
+
+			//print(userName)
+			//println(":  " + msg.contents)
+
+			//TODO make a gui to interface with that prints out messages
+			//if sender Id = my sender Id think of it as an acknowledgment and update status (sent vs sending)
 		}
 
-		print(userName)
-		println(":  " + msg.contents)
-
-		//TODO make a gui to interface with that prints out messages
-		//if sender Id = my sender Id think of it as an acknowledgment and update status
 	}
 }
 
+// senders a message to the server
 func sendMessage() {
 
 	// initialize
 	var buffer bytes.Buffer
 	encoder := gob.NewEncoder(&buffer)
 
+	senderChannel <- clientUsers[myID]
+
 	for {
 		messageContents, ok := <-senderChannel
 
+		// if the user sends a message
 		if ok {
 			message := Message{
 				senderId: myID,
 				contents: messageContents,
 			}
 
-			// convert pointers to real data
+			// convert string pointer in message to real data
 			err := encoder.Encode(message)
 
 			if err != nil {
@@ -86,11 +109,11 @@ func sendMessage() {
 	}
 }
 
+// global variables
 var clientUsers map[uint32]string
 var myID uint32
 var senderChannel chan string
 var receiverChannel chan Message
-
 var clientConn net.Conn
 
 func initClient() {
@@ -113,17 +136,44 @@ func initClient() {
 
 	clientUsers[myID] = name
 
-	clientConn, err = net.Dial("tcp", ":1000")
-
 	for {
-		if err != nil {
-			clientConn, err = net.Dial("tcp", ":1000")
-		} else {
+		clientConn, err = net.Dial("tcp", ":1000")
+
+		if err == nil {
 			break
 		}
 	}
 
-	return
+	initGUI()
+}
+
+func initGUI() {
+	app = tview.NewApplication()
+
+	msgView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true).
+		SetChangedFunc(func() { app.Draw() })
+	msgView.SetBorder(true).SetTitle(" Messages ")
+
+	inputField := tview.NewInputField().
+		SetLabel("> ").
+		SetFieldBackgroundColor(tcell.ColorDefault)
+	inputField.SetDoneFunc(func(key tcell.Key) {
+		if key != tcell.KeyEnter {
+			return
+		}
+		text := inputField.GetText()
+		if text == "" {
+			return
+		}
+		senderChannel <- text
+		inputField.SetText("")
+	})
+
+	layout = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(msgView, 0, 1, false).
+		AddItem(inputField, 3, 0, true)
 }
 
 func getUserInput() {
@@ -144,10 +194,17 @@ func getUserInput() {
 
 func clientMain() {
 
-	// why is this not compiling
 	initClient()
+
 	go receiveMessage()
 	go sendMessage()
-	getUserInput()
+	go messageManager()
 
+	if err := app.SetRoot(layout, true).Run(); err != nil {
+		panic(err)
+	}
 }
+
+var app *tview.Application
+var msgView *tview.TextView
+var layout *tview.Flex

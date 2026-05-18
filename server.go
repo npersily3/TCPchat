@@ -103,6 +103,8 @@ func handleConn(conn net.Conn) {
 	var clientInfo ClientInfo
 	var rawData []byte
 
+	rawData = make([]byte, 1024)
+
 	//read in the starter to data the client sends
 	n, err := conn.Read(rawData)
 
