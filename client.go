@@ -3,15 +3,31 @@ package main
 import (
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 	"os"
+	"strconv"
+	"sync"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
+
+type Client struct {
+	Name string
+}
+
+// UserData we reserve ID 0 for ourselves which holds to value of our id as a string
+// then we know at the start what our ID is,
+type UserData struct {
+	ClientUsers map[uint32]Client `json:"users"`
+}
+
+var userDataBase UserData
 
 // Recieves message from server, decodes it, and pushes it to the channel
 func receiveMessage() {
@@ -131,34 +147,85 @@ func sendMessage() {
 }
 
 // global variables
-var clientUsers map[uint32]string
+
 var myID uint32
 var senderChannel chan string
 var receiverChannel chan Message
 var clientConn net.Conn
 
+func initJSON() {
+
+	_, err := os.Stat("data.json")
+
+	//instantiate local database
+	userDataBase.ClientUsers = make(map[uint32]Client)
+
+	// If the file exists
+	if err == nil {
+
+		bytes, err := os.ReadFile("data.json")
+
+		err = json.Unmarshal(bytes, &userDataBase)
+
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// read in the user ID from index 0
+		tempID, err := strconv.Atoi(userDataBase.ClientUsers[0].Name)
+		myID = uint32(tempID)
+
+		//we have finished reading our id in and we have everything locally, we are good
+
+		// IF the file does not exist
+	} else if errors.Is(err, os.ErrNotExist) {
+		//file Exists we do not need to create new json file
+		file, err := os.Create("data.json")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		myID = rand.Uint32()
+
+		//right my id to index 0, for safe keeping when we close and save.
+		userDataBase.ClientUsers[0] = Client{
+			strconv.Itoa(int(myID)),
+		}
+
+		var name string
+
+		println("What is your username")
+
+		_, err = fmt.Scanln(&name)
+
+		if err != nil {
+			panic(err)
+		}
+
+		userDataBase.ClientUsers[myID] = Client{
+			name,
+		}
+
+		//TODO find a good way to periodically save data to a file
+		err = file.Close()
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		fmt.Println("Other error:", err)
+	}
+}
+
 func initClient() {
 
-	f, _ := os.OpenFile("debug.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	log.SetOutput(f)
+	var err error
+	var waitGroup sync.WaitGroup
 
-	clientUsers = make(map[uint32]string)
-	myID = rand.Uint32()
+	//Here we are reading in the user hashmap from disk while connecting to servers concurrently
+	waitGroup.Go(initJSON)
 
 	senderChannel = make(chan string, 16)
 	receiverChannel = make(chan Message, 16)
-
-	var name string
-
-	println("What is your username")
-
-	_, err := fmt.Scanln(&name)
-
-	if err != nil {
-		panic(err)
-	}
-
-	clientUsers[myID] = name
 
 	for {
 		clientConn, err = net.Dial("tcp", ":1000")
@@ -167,6 +234,8 @@ func initClient() {
 			break
 		}
 	}
+
+	waitGroup.Wait()
 
 	initGUI()
 }

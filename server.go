@@ -16,10 +16,6 @@ type ClientInfo struct {
 }
 
 // simple message and sender structs
-type Message struct {
-	SenderId uint32
-	Contents string
-}
 
 // global hashmap for easy lookup of ids
 var serverUsers = map[uint32]ClientInfo{}
