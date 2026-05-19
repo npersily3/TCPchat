@@ -4,7 +4,6 @@ import (
 	"encoding/gob"
 	"fmt"
 	"net"
-	"strconv"
 )
 
 type ClientInfo struct {
@@ -94,9 +93,10 @@ func getOthersOnline() string {
 
 		// if a user is still online
 		if value.conn != nil {
-			list += strconv.Itoa(int(key))
+			// this is intentionally cast like this, because I want the byte representation
+			list += string(key)
 			length = len(value.userName)
-			list += strconv.Itoa(length)
+			list += string(length)
 			list += value.userName
 		}
 	}

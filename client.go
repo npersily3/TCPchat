@@ -1,13 +1,13 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 	"os"
-	"strconv"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -42,35 +42,26 @@ func messageManager() {
 		panic("Sender ID mismatch on first message")
 	}
 
-	index := 0
+	contents := []byte(firstMessage.Contents)
 
-	contents := firstMessage.Contents
+	for len(contents) > 0 {
 
-	for {
+		// read in the first 4 bytes as a number
+		id := binary.BigEndian.Uint32(contents)
 
-		// read in the first byte
-		id, err := strconv.Atoi(contents[index : index+4])
-		index += 4
+		//consume the id
+		contents = contents[4:]
 
-		if err != nil {
-			if err.Error() == "EOF" {
-				break
-			} else {
-				panic(err)
-			}
-		}
+		// read and consume length
+		length := binary.BigEndian.Uint32(contents)
+		contents = contents[4:]
 
-		length, err := strconv.Atoi(contents[index : index+4])
+		// read and consume length
+		name := string(contents[:length])
+		contents = contents[length:]
 
-		if err != nil {
-			panic(err.Error())
-		}
-
-		index += 4
-		name := contents[index : index+length]
-
-		clientUsers[uint32(id)] = name
-
+		//add it to hashmap
+		clientUsers[id] = name
 	}
 
 	for {
