@@ -18,11 +18,12 @@ import (
 )
 
 type Client struct {
-	Name string
+	isOnline bool
+	Name     string
 }
 
 // UserData we reserve ID 0 for ourselves which holds to value of our id as a string
-// then we know at the start what our ID is,
+// then we know at the start what our ID is, ID 0 also means it is the server communicating to us what happens
 type UserData struct {
 	ClientUsers map[uint32]Client `json:"users"`
 }
@@ -49,36 +50,28 @@ func receiveMessage() {
 	}
 }
 
+func dealWithServerMessages(msg Message) {
+
+}
+
+func getUserName(id uint32) {
+
+	var numberAsBytes []byte
+
+	binary.BigEndian.PutUint32(numberAsBytes, id)
+
+	newMessage := InternalMessageData{
+		CONTROL_MESSAGE,
+		numberAsBytes,
+	}
+
+	senderChannel <- newMessage
+
+}
+
 // pull messages off of the channel and prints them out
-func messageManager() {
-
-	firstMessage := <-receiverChannel
-
-	if firstMessage.SenderId != myID {
-		panic("Sender ID mismatch on first message")
-	}
-
-	contents := []byte(firstMessage.Contents)
-
-	for len(contents) > 0 {
-
-		// read in the first 4 bytes as a number
-		id := binary.BigEndian.Uint32(contents)
-
-		//consume the id
-		contents = contents[4:]
-
-		// read and consume length
-		length := binary.BigEndian.Uint32(contents)
-		contents = contents[4:]
-
-		// read and consume length
-		name := string(contents[:length])
-		contents = contents[length:]
-
-		//add it to hashmap
-		clientUsers[id] = name
-	}
+// TODO run a benchmark and see if we should parrallelize this (array of channels)
+func receivedMessageManager() {
 
 	for {
 		msg, ok := <-receiverChannel
@@ -87,30 +80,36 @@ func messageManager() {
 		if ok {
 			senderId := msg.SenderId
 
-			userName, isInitialized := clientUsers[senderId]
+			// if the system sent us back a message then do stuff
+			if msg.Payload.MessageType == CONTROL_MESSAGE {
+				dealWithServerMessages(msg)
+				continue
+			}
+
+			client, isInitialized := userDataBase.ClientUsers[senderId]
 
 			// initialize a user, there should be no other message
 			if !isInitialized {
-				name := msg.Contents
-				clientUsers[senderId] = name
-
-				//GUI specific thing
-				{
-					app.QueueUpdateDraw(func() {
-						fmt.Fprintf(msgView, "[yellow]%s joined[-]\n", name)
-					})
-				}
-				continue
+				//TODO should this block? I think it must, I could table it to another thread called the name waiter thread but that seems od
+				getUserName(senderId)
 			}
+
+			//if it is a first log on, display the message and update the entry
+			if client.isOnline == false {
+				client.isOnline = true
+
+				app.QueueUpdateDraw(func() {
+					fmt.Fprintf(msgView, "[yellow]%s joined[-]\n", client.Name)
+				})
+
+				//
+				userDataBase.ClientUsers[senderId] = client
+			}
+
 			app.QueueUpdateDraw(func() {
-				fmt.Fprintf(msgView, "[green]%s[-]: %s\n", userName, msg.Contents)
+				fmt.Fprintf(msgView, "[green]%s[-]: %s\n", client.Name, msg.Payload.Contents)
 			})
 
-			//print(userName)
-			//println(":  " + msg.contents)
-
-			//TODO make a gui to interface with that prints out messages
-			//if sender Id = my sender Id think of it as an acknowledgment and update status (sent vs sending)
 		}
 
 	}
@@ -123,25 +122,26 @@ func sendMessage() {
 
 	encoder := gob.NewEncoder(clientConn)
 
-	//print the user name first for the servers hashmap
-	senderChannel <- clientUsers[myID]
+	//the first message should be our name to the database
+	senderChannel <- InternalMessageData{CONTROL_MESSAGE, []byte((userDataBase.ClientUsers[myID].Name))}
 
 	for {
-		messageContents, ok := <-senderChannel
+		messageData, ok := <-senderChannel
 
 		// if the user sends a message
 		if ok {
-			message := Message{
-				SenderId: myID,
-				Contents: messageContents,
-			}
 
-			// convert string pointer in message to real data
-			err := encoder.Encode(message)
+		}
+		message := Message{
+			SenderId: myID,
+			Payload:  messageData,
+		}
 
-			if err != nil {
-				panic(err)
-			}
+		// convert string pointer in message to real data
+		err := encoder.Encode(message)
+
+		if err != nil {
+			panic(err)
 		}
 	}
 }
@@ -149,7 +149,7 @@ func sendMessage() {
 // global variables
 
 var myID uint32
-var senderChannel chan string
+var senderChannel chan InternalMessageData
 var receiverChannel chan Message
 var clientConn net.Conn
 
@@ -189,6 +189,7 @@ func initJSON() {
 
 		//right my id to index 0, for safe keeping when we close and save.
 		userDataBase.ClientUsers[0] = Client{
+			false,
 			strconv.Itoa(int(myID)),
 		}
 
@@ -203,6 +204,7 @@ func initJSON() {
 		}
 
 		userDataBase.ClientUsers[myID] = Client{
+			true,
 			name,
 		}
 
@@ -224,7 +226,7 @@ func initClient() {
 	//Here we are reading in the user hashmap from disk while connecting to servers concurrently
 	waitGroup.Go(initJSON)
 
-	senderChannel = make(chan string, 16)
+	senderChannel = make(chan InternalMessageData, 16)
 	receiverChannel = make(chan Message, 16)
 
 	for {
@@ -260,7 +262,10 @@ func initGUI() {
 		if text == "" {
 			return
 		}
-		senderChannel <- text
+		senderChannel <- InternalMessageData{
+			DATA_MESSAGE,
+			[]byte(text),
+		}
 		inputField.SetText("")
 	})
 
@@ -275,7 +280,7 @@ func clientMain() {
 
 	go receiveMessage()
 	go sendMessage()
-	go messageManager()
+	go receivedMessageManager()
 
 	if err := app.SetRoot(layout, true).Run(); err != nil {
 		panic(err)
