@@ -318,7 +318,7 @@ func serverMain() {
 
 	initServerJSON()
 
-	ln, err := net.Listen("tcp", ":1000")
+	ln, err := net.Listen("tcp", port)
 
 	if err != nil {
 		panic(err)

@@ -219,7 +219,7 @@ func initClient() {
 	receiverChannel = make(chan Message, 16)
 
 	for {
-		clientConn, err = net.Dial("tcp", ":1000")
+		clientConn, err = net.Dial("tcp", port)
 
 		if err == nil {
 			break
