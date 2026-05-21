@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -16,17 +15,6 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
-
-type Client struct {
-	isOnline bool
-	Name     string
-}
-
-// UserData we reserve ID 0 for ourselves which holds to value of our id as a string
-// then we know at the start what our ID is, ID 0 also means it is the server communicating to us what happens
-type UserData struct {
-	ClientUsers map[uint32]Client `json:"users"`
-}
 
 var userDataBase UserData
 
@@ -50,25 +38,6 @@ func receiveMessage() {
 	}
 }
 
-func dealWithServerMessages(msg Message) {
-
-}
-
-func getUserName(id uint32) {
-
-	var numberAsBytes []byte
-
-	binary.BigEndian.PutUint32(numberAsBytes, id)
-
-	newMessage := InternalMessageData{
-		CONTROL_MESSAGE,
-		numberAsBytes,
-	}
-
-	senderChannel <- newMessage
-
-}
-
 // pull messages off of the channel and prints them out
 // TODO run a benchmark and see if we should parrallelize this (array of channels)
 func receivedMessageManager() {
@@ -79,23 +48,33 @@ func receivedMessageManager() {
 		// if there is a message
 		if ok {
 			senderId := msg.SenderId
-
-			// if the system sent us back a message then do stuff
-			if msg.Payload.MessageType == CONTROL_MESSAGE {
-				dealWithServerMessages(msg)
-				continue
-			}
+			opCode := msg.Payload.OPcode
 
 			client, isInitialized := userDataBase.ClientUsers[senderId]
 
-			// initialize a user, there should be no other message
-			if !isInitialized {
-				//TODO should this block? I think it must, I could table it to another thread called the name waiter thread but that seems od
-				getUserName(senderId)
-			}
+			switch opCode {
 
-			//if it is a first log on, display the message and update the entry
-			if client.isOnline == false {
+			case DATA_MESSAGE:
+
+				if !isInitialized {
+					panic("uninitialized client")
+				}
+				if !client.isOnline {
+					panic("client not online")
+				}
+
+				app.QueueUpdateDraw(func() {
+					fmt.Fprintf(msgView, "[green]%s[-]: %s\n", client.Name, msg.Payload.Contents)
+				})
+			case NEW_USER_ONLINE:
+
+				if !isInitialized {
+					panic("uninitialized client")
+				}
+				if client.isOnline {
+					panic("client online")
+				}
+
 				client.isOnline = true
 
 				app.QueueUpdateDraw(func() {
@@ -104,11 +83,21 @@ func receivedMessageManager() {
 
 				//
 				userDataBase.ClientUsers[senderId] = client
-			}
 
-			app.QueueUpdateDraw(func() {
-				fmt.Fprintf(msgView, "[green]%s[-]: %s\n", client.Name, msg.Payload.Contents)
-			})
+			// this is also new
+			case NEW_USERNAME:
+				userName := string(msg.Payload.Contents)
+				newClient := Client{isOnline: true, Name: userName}
+				userDataBase.ClientUsers[senderId] = newClient
+
+				app.QueueUpdateDraw(func() {
+					fmt.Fprintf(msgView, "[yellow]%s is a new user who joined[-]\n", userName)
+				})
+
+			default:
+				panic("unknown opcode")
+
+			}
 
 		}
 
@@ -118,12 +107,12 @@ func receivedMessageManager() {
 // senders a message to the server
 func sendMessage() {
 
-	// initialize
-
 	encoder := gob.NewEncoder(clientConn)
 
-	//the first message should be our name to the database
-	senderChannel <- InternalMessageData{CONTROL_MESSAGE, []byte((userDataBase.ClientUsers[myID].Name))}
+	senderChannel <- InternalMessageData{
+		OPcode:   DATA_MESSAGE,
+		Contents: []byte(userDataBase.ClientUsers[myID].Name),
+	}
 
 	for {
 		messageData, ok := <-senderChannel
