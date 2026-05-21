@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 )
 
 type ClientInfo struct {
@@ -15,10 +17,8 @@ type ClientInfo struct {
 	userID       uint32
 	channel      chan Message
 	isOnline     bool
-	userDataBase UserData
-
-	// have this be last because it is of variable size
-	userName string
+	UserName     string   `json:"name"`
+	UserDataBase UserData `json:"database"`
 }
 type ServerData struct {
 	ServerUsers map[uint32]ClientInfo `json:"users"`
@@ -63,8 +63,8 @@ func perClientReceiver(userId uint32, decoder *gob.Decoder) {
 // This is a per client function that
 func perClientSender(userId uint32) {
 
-	info := serverUsers[userId]
-	encoder := gob.NewEncoder(serverUsers[userId].conn)
+	info := serverUsers.ServerUsers[userId]
+	encoder := gob.NewEncoder(serverUsers.ServerUsers[userId].conn)
 
 	for {
 		// receive a message
@@ -72,12 +72,12 @@ func perClientSender(userId uint32) {
 
 		senderID := message.SenderId
 
-		client, isInitialized := serverUsers[userId].userDataBase.ClientUsers[senderID]
+		client, isInitialized := serverUsers.ServerUsers[userId].UserDataBase.ClientUsers[senderID]
 
 		if !isInitialized {
-			senderName := serverUsers[senderID].userName
+			senderName := serverUsers.ServerUsers[senderID].UserName
 
-			serverUsers[userId].userDataBase.ClientUsers[senderID] = Client{
+			serverUsers.ServerUsers[userId].UserDataBase.ClientUsers[senderID] = Client{
 				isOnline: true,
 				Name:     senderName,
 			}
@@ -124,13 +124,58 @@ func perClientSender(userId uint32) {
 
 func getCurrentlyOnlineUsers() []byte {
 
-	//TODO need local slice
+	finalArray := []byte{}
+
+	localArray := make([]byte, 4)
 
 	for key, value := range serverUsers.ServerUsers {
 		if value.isOnline {
-
+			binary.BigEndian.PutUint32(localArray, key)
 		}
+		finalArray = append(finalArray, localArray...)
 	}
+
+	return finalArray
+}
+
+// TODO read in or create a local json of names to client info, do not export the conn field or isOnline field
+func initializeServerSideClientJson(id uint32) UserData {
+	fileName := "friendsList" + strconv.Itoa(int(id)) + ".json"
+
+	_, err := os.Stat(fileName)
+
+	//instantiate local database
+	serverUsers.ServerUsers[id] = ClientInfo{}
+	var userData UserData
+
+	// If the file exists
+	if err == nil {
+
+		bytes, err := os.ReadFile(fileName)
+
+		err = json.Unmarshal(bytes, &userData)
+
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// IF the file does not exist
+	} else if errors.Is(err, os.ErrNotExist) {
+		//file Exists we do not need to create new json file
+		file, err := os.Create("data.json")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		err = file.Close()
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		fmt.Println("Other error:", err)
+	}
+
+	return userData
 }
 
 // handles a new connection to the server
@@ -161,27 +206,35 @@ func handleConn(conn net.Conn) {
 
 		// initialize user name and channel, then add to hashmap
 		clientInfo.conn = conn
-		clientInfo.userName = string(msg.Payload.Contents)
+		clientInfo.UserName = string(msg.Payload.Contents)
 		clientInfo.channel = make(chan Message, 16)
 		clientInfo.isOnline = true
-		//TODO initialize the JSON of Usernames
-
+		clientInfo.UserDataBase = initializeServerSideClientJson(clientInfo.userID)
 		var otherActiveUsers []byte = getCurrentlyOnlineUsers()
 		// send back the current list of users
 		// this line has to be in this exact location, because we need the channel to exist, but we cannot be in the hashmap yet, so there is no race condtion
 		// this message will always be the first one recieved back
+
+		//TODO think about a race condition where someone goes online here and just lurks,
+		//they will not know we are online because we are not identified as online, and we will not know if they are online
 		clientInfo.channel <- Message{
 			SenderId: clientInfo.userID,
-			Contents: otherActiveUsers,
+			Payload: InternalMessageData{
+				OPcode:   NEW_USERNAME,
+				Contents: otherActiveUsers,
+			},
 		}
 
-		serverUsers[clientInfo.userID] = clientInfo
+		serverUsers.ServerUsers[clientInfo.userID] = clientInfo
 
 		// send a message to everyone of our username and id, since this message will inevitably be sent back to us
 		// it also serves as an acknowledgment
 		initialMessage := Message{
 			SenderId: clientInfo.userID,
-			Contents: clientInfo.userName,
+			Payload: InternalMessageData{
+				OPcode:   NEW_USER_ONLINE,
+				Contents: nil,
+			},
 		}
 		globalChannel <- initialMessage
 
