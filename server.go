@@ -10,15 +10,18 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync/atomic"
+	"time"
 )
 
 type ClientInfo struct {
-	conn         net.Conn
-	userID       uint32
-	channel      chan Message
-	isOnline     bool
-	UserName     string   `json:"name"`
-	UserDataBase UserData `json:"database"`
+	conn          net.Conn
+	userID        uint32
+	channel       chan Message
+	isOnline      bool
+	recentChanges *atomic.Bool
+	UserName      string   `json:"name"`
+	UserDataBase  UserData `json:"-"`
 }
 type ServerData struct {
 	ServerUsers map[uint32]ClientInfo `json:"users"`
@@ -26,6 +29,8 @@ type ServerData struct {
 
 // global hashmap for easy lookup of ids
 var serverUsers = ServerData{}
+
+var serverRecentChanges atomic.Bool
 
 // channel for all serverUsers to push messages
 var globalChannel chan Message
@@ -81,6 +86,7 @@ func perClientSender(userId uint32) {
 				isOnline: true,
 				Name:     senderName,
 			}
+			info.recentChanges.Store(true)
 
 			serverMessage := Message{
 				SenderId: senderID,
@@ -209,6 +215,7 @@ func handleConn(conn net.Conn) {
 		clientInfo.UserName = string(msg.Payload.Contents)
 		clientInfo.channel = make(chan Message, 16)
 		clientInfo.isOnline = true
+		clientInfo.recentChanges = new(atomic.Bool)
 		clientInfo.UserDataBase = initializeServerSideClientJson(clientInfo.userID)
 		var otherActiveUsers []byte = getCurrentlyOnlineUsers()
 		// send back the current list of users
@@ -226,6 +233,7 @@ func handleConn(conn net.Conn) {
 		}
 
 		serverUsers.ServerUsers[clientInfo.userID] = clientInfo
+		serverRecentChanges.Store(true)
 
 		// send a message to everyone of our username and id, since this message will inevitably be sent back to us
 		// it also serves as an acknowledgment
@@ -245,6 +253,7 @@ func handleConn(conn net.Conn) {
 	// now that the thread is initialized, we can launch the two new goroutines and exit
 	go perClientSender(clientInfo.userID)
 	go perClientReceiver(clientInfo.userID, decoder)
+	go writeToPerClientJson(clientInfo.userID)
 }
 
 // Constantly listens for new users, and initializes them
@@ -273,6 +282,48 @@ func sendMessageToEveryOne(message Message) {
 	// it actually works in our favor as a form of acknowledgment
 	for _, value := range serverUsers.ServerUsers {
 		value.channel <- message
+	}
+}
+
+func writeToPerClientJson(userId uint32) {
+	for {
+		time.Sleep(4 * time.Second)
+
+		info := serverUsers.ServerUsers[userId]
+		recentChanges := info.recentChanges.Swap(false)
+
+		if recentChanges {
+			updated, err := json.MarshalIndent(info.UserDataBase, "", "  ")
+			if err != nil {
+				panic(err)
+			}
+
+			fileName := "friendsList" + strconv.Itoa(int(userId)) + ".json"
+			err = os.WriteFile(fileName, updated, 0644)
+			if err != nil {
+				panic(err)
+			}
+		}
+	}
+}
+
+func writeToServerJson() {
+	for {
+		time.Sleep(4 * time.Second)
+
+		recentChanges := serverRecentChanges.Swap(false)
+
+		if recentChanges {
+			updated, err := json.MarshalIndent(serverUsers, "", "  ")
+			if err != nil {
+				panic(err)
+			}
+
+			err = os.WriteFile("data.json", updated, 0644)
+			if err != nil {
+				panic(err)
+			}
+		}
 	}
 }
 
@@ -317,6 +368,8 @@ func serverMain() {
 	globalChannel = make(chan Message, 128)
 
 	initServerJSON()
+
+	go writeToServerJson()
 
 	ln, err := net.Listen("tcp", port)
 
