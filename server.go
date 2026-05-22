@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -77,6 +78,10 @@ func perClientSender(userId uint32) {
 
 		senderID := message.SenderId
 
+		if senderID == userId {
+			continue
+		}
+
 		client, isInitialized := serverUsers.ServerUsers[userId].UserDataBase.ClientUsers[senderID]
 
 		if !isInitialized {
@@ -137,51 +142,45 @@ func getCurrentlyOnlineUsers() []byte {
 	for key, value := range serverUsers.ServerUsers {
 		if value.isOnline {
 			binary.BigEndian.PutUint32(localArray, key)
+			finalArray = append(finalArray, localArray...)
 		}
-		finalArray = append(finalArray, localArray...)
+
 	}
 
 	return finalArray
 }
 
 // Every login, read in the json to data
-func initializeServerSideClientJson(id uint32) UserData {
-	fileName := "friendsList" + strconv.Itoa(int(id)) + ".json"
+func initializeServerSideClientJson(id uint32, database *UserData) {
+	fileName := filepath.Join(cfg.DataDir, "friendsList"+strconv.Itoa(int(id))+".json")
 
 	_, err := os.Stat(fileName)
 
 	//instantiate local database
 	serverUsers.ServerUsers[id] = ClientInfo{}
-	var userData UserData
 
 	// If the file exists
 	if err == nil {
-
 		bytes, err := os.ReadFile(fileName)
-
-		err = json.Unmarshal(bytes, &userData)
-
 		if err != nil {
+			log.Fatal(err)
+		}
+		if err = json.Unmarshal(bytes, database); err != nil {
 			log.Fatal(err)
 		}
 
 		// IF the file does not exist
 	} else if errors.Is(err, os.ErrNotExist) {
-		//file Exists we do not need to create new json file
-		file, err := os.Create("data.json")
+		initial, err := json.MarshalIndent(database, "", "  ")
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		err = file.Close()
-		if err != nil {
-			panic(err)
+		if err = os.WriteFile(fileName, initial, 0644); err != nil {
+			log.Fatal(err)
 		}
 	} else {
 		fmt.Println("Other error:", err)
 	}
-
-	return userData
 }
 
 // handles a new connection to the server
@@ -202,21 +201,23 @@ func handleConn(conn net.Conn) {
 
 	clientInfo.userID = msg.SenderId
 
-	oldClientInfo, ok := serverUsers.ServerUsers[clientInfo.userID]
+	_, ok := serverUsers.ServerUsers[clientInfo.userID]
 
+	clientInfo.conn = conn
 	// if we exist in the hashmap (have been online before
 	if ok {
-		oldClientInfo.conn = conn
+
 		// if  we are a new user,
 	} else {
 
 		// initialize user name and channel, then add to hashmap
-		clientInfo.conn = conn
+
 		clientInfo.UserName = string(msg.Payload.Contents)
 		clientInfo.channel = make(chan Message, 16)
 		clientInfo.isOnline = true
 		clientInfo.recentChanges = new(atomic.Bool)
-		clientInfo.UserDataBase = initializeServerSideClientJson(clientInfo.userID)
+		clientInfo.UserDataBase.ClientUsers = make(map[uint32]Client)
+		initializeServerSideClientJson(clientInfo.userID, &clientInfo.UserDataBase)
 		var otherActiveUsers []byte = getCurrentlyOnlineUsers()
 		// send back the current list of users
 		// this line has to be in this exact location, because we need the channel to exist, but we cannot be in the hashmap yet, so there is no race condtion
@@ -289,16 +290,15 @@ func writeToPerClientJson(userId uint32) {
 	for {
 		time.Sleep(4 * time.Second)
 
-		info := serverUsers.ServerUsers[userId]
-		recentChanges := info.recentChanges.Swap(false)
+		recentChanges := serverUsers.ServerUsers[userId].recentChanges.Swap(false)
 
 		if recentChanges {
-			updated, err := json.MarshalIndent(info.UserDataBase, "", "  ")
+			updated, err := json.MarshalIndent(serverUsers.ServerUsers[userId].UserDataBase, "", "  ")
 			if err != nil {
 				panic(err)
 			}
 
-			fileName := "friendsList" + strconv.Itoa(int(userId)) + ".json"
+			fileName := filepath.Join(cfg.DataDir, "friendsList"+strconv.Itoa(int(userId))+".json")
 			err = os.WriteFile(fileName, updated, 0644)
 			if err != nil {
 				panic(err)
@@ -319,7 +319,7 @@ func writeToServerJson() {
 				panic(err)
 			}
 
-			err = os.WriteFile("data.json", updated, 0644)
+			err = os.WriteFile(filepath.Join(cfg.DataDir, "data.json"), updated, 0644)
 			if err != nil {
 				panic(err)
 			}
@@ -328,34 +328,30 @@ func writeToServerJson() {
 }
 
 func initServerJSON() {
-	_, err := os.Stat("data.json")
+	path := filepath.Join(cfg.DataDir, "data.json")
+	_, err := os.Stat(path)
 
 	//instantiate local database
 	serverUsers.ServerUsers = make(map[uint32]ClientInfo)
 
 	// If the file exists
 	if err == nil {
-
-		bytes, err := os.ReadFile("data.json")
-
-		err = json.Unmarshal(bytes, &serverUsers)
-
+		bytes, err := os.ReadFile(path)
 		if err != nil {
+			log.Fatal(err)
+		}
+		if err = json.Unmarshal(bytes, &serverUsers); err != nil {
 			log.Fatal(err)
 		}
 
 		// IF the file does not exist
 	} else if errors.Is(err, os.ErrNotExist) {
-		//file Exists we do not need to create new json file
-		file, err := os.Create("data.json")
+		initial, err := json.MarshalIndent(serverUsers, "", "  ")
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		//TODO find a good way to periodically save data to a file
-		err = file.Close()
-		if err != nil {
-			panic(err)
+		if err = os.WriteFile(path, initial, 0644); err != nil {
+			log.Fatal(err)
 		}
 	} else {
 		fmt.Println("Other error:", err)

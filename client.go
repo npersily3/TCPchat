@@ -9,8 +9,8 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -163,7 +163,7 @@ func writeToClientSideJson() {
 
 			// Write back to file
 			//the 0644 is an octal code to specify permissions
-			err = os.WriteFile("data.json", updated, 0644)
+			err = os.WriteFile(filepath.Join(cfg.DataDir, "data.json"), updated, 0644)
 
 			if err != nil {
 				panic(err)
@@ -174,20 +174,20 @@ func writeToClientSideJson() {
 }
 
 func initJSON() {
+	path := filepath.Join(cfg.DataDir, "data.json")
 
-	_, err := os.Stat("data.json")
+	_, err := os.Stat(path)
 
 	//instantiate local database
 	clientState.userDataBase.ClientUsers = make(map[uint32]Client)
 
 	// If the file exists
 	if err == nil {
-
-		bytes, err := os.ReadFile("data.json")
-
-		err = json.Unmarshal(bytes, &clientState.userDataBase)
-
+		bytes, err := os.ReadFile(path)
 		if err != nil {
+			panic(err)
+		}
+		if err = json.Unmarshal(bytes, &clientState.userDataBase); err != nil {
 			log.Fatal(err)
 		}
 
@@ -199,8 +199,7 @@ func initJSON() {
 
 		// IF the file does not exist
 	} else if errors.Is(err, os.ErrNotExist) {
-		//file Exists we do not need to create new json file
-		file, err := os.Create("data.json")
+		file, err := os.Create(path)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -228,13 +227,14 @@ func initJSON() {
 			name,
 		}
 
-		clientState.recentChanges.Store(true)
-
-		//TODO find a good way to periodically save data to a file
-		err = file.Close()
+		initial, err := json.MarshalIndent(clientState.userDataBase, "", "  ")
 		if err != nil {
 			panic(err)
 		}
+		if err = os.WriteFile(path, initial, 0644); err != nil {
+			panic(err)
+		}
+		file.Close()
 	} else {
 		fmt.Println("Other error:", err)
 	}
@@ -243,10 +243,9 @@ func initJSON() {
 func initClient() {
 
 	var err error
-	var waitGroup sync.WaitGroup
 
 	//Here we are reading in the user hashmap from disk while connecting to servers concurrently
-	waitGroup.Go(initJSON)
+	initJSON()
 
 	clientState.senderChannel = make(chan InternalMessageData, 16)
 	clientState.receiverChannel = make(chan Message, 16)
@@ -258,8 +257,6 @@ func initClient() {
 			break
 		}
 	}
-
-	waitGroup.Wait()
 
 	initGUI()
 }
