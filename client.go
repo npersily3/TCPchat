@@ -11,17 +11,28 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
 
-var userDataBase UserData
+type ClientGlobalData struct {
+	userDataBase    UserData
+	myID            uint32
+	senderChannel   chan InternalMessageData
+	receiverChannel chan Message
+	clientConn      net.Conn
+	recentChanges   atomic.Bool
+}
+
+var clientState ClientGlobalData
 
 // Recieves message from server, decodes it, and pushes it to the channel
 func receiveMessage() {
 
-	decoder := gob.NewDecoder(clientConn)
+	decoder := gob.NewDecoder(clientState.clientConn)
 
 	for {
 		// recieve a message
@@ -34,7 +45,7 @@ func receiveMessage() {
 			return
 		}
 
-		receiverChannel <- msg
+		clientState.receiverChannel <- msg
 	}
 }
 
@@ -43,14 +54,14 @@ func receiveMessage() {
 func receivedMessageManager() {
 
 	for {
-		msg, ok := <-receiverChannel
+		msg, ok := <-clientState.receiverChannel
 
 		// if there is a message
 		if ok {
 			senderId := msg.SenderId
 			opCode := msg.Payload.OPcode
 
-			client, isInitialized := userDataBase.ClientUsers[senderId]
+			client, isInitialized := clientState.userDataBase.ClientUsers[senderId]
 
 			switch opCode {
 
@@ -81,14 +92,15 @@ func receivedMessageManager() {
 					fmt.Fprintf(msgView, "[yellow]%s joined[-]\n", client.Name)
 				})
 
-				//
-				userDataBase.ClientUsers[senderId] = client
+				// do not update the json, because the only field changed only pertains to the current state
+				clientState.userDataBase.ClientUsers[senderId] = client
 
 			// this is also new
 			case NEW_USERNAME:
 				userName := string(msg.Payload.Contents)
 				newClient := Client{isOnline: true, Name: userName}
-				userDataBase.ClientUsers[senderId] = newClient
+				clientState.userDataBase.ClientUsers[senderId] = newClient
+				clientState.recentChanges.Store(true)
 
 				app.QueueUpdateDraw(func() {
 					fmt.Fprintf(msgView, "[yellow]%s is a new user who joined[-]\n", userName)
@@ -107,22 +119,22 @@ func receivedMessageManager() {
 // senders a message to the server
 func sendMessage() {
 
-	encoder := gob.NewEncoder(clientConn)
+	encoder := gob.NewEncoder(clientState.clientConn)
 
-	senderChannel <- InternalMessageData{
+	clientState.senderChannel <- InternalMessageData{
 		OPcode:   DATA_MESSAGE,
-		Contents: []byte(userDataBase.ClientUsers[myID].Name),
+		Contents: []byte(clientState.userDataBase.ClientUsers[clientState.myID].Name),
 	}
 
 	for {
-		messageData, ok := <-senderChannel
+		messageData, ok := <-clientState.senderChannel
 
 		// if the user sends a message
 		if ok {
 
 		}
 		message := Message{
-			SenderId: myID,
+			SenderId: clientState.myID,
 			Payload:  messageData,
 		}
 
@@ -135,34 +147,53 @@ func sendMessage() {
 	}
 }
 
-// global variables
+// periodically write to json
+func writeToClientSideJson() {
+	for {
+		time.Sleep(4 * time.Second)
 
-var myID uint32
-var senderChannel chan InternalMessageData
-var receiverChannel chan Message
-var clientConn net.Conn
+		recentChanges := clientState.recentChanges.Swap(false)
+
+		if recentChanges {
+			// Marshal back to JSON
+			updated, err := json.MarshalIndent(clientState.userDataBase, "", "  ")
+			if err != nil {
+				panic(err)
+			}
+
+			// Write back to file
+			//the 0644 is an octal code to specify permissions
+			err = os.WriteFile("data.json", updated, 0644)
+
+			if err != nil {
+				panic(err)
+			}
+		}
+
+	}
+}
 
 func initJSON() {
 
 	_, err := os.Stat("data.json")
 
 	//instantiate local database
-	userDataBase.ClientUsers = make(map[uint32]Client)
+	clientState.userDataBase.ClientUsers = make(map[uint32]Client)
 
 	// If the file exists
 	if err == nil {
 
 		bytes, err := os.ReadFile("data.json")
 
-		err = json.Unmarshal(bytes, &userDataBase)
+		err = json.Unmarshal(bytes, &clientState.userDataBase)
 
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		// read in the user ID from index 0
-		tempID, err := strconv.Atoi(userDataBase.ClientUsers[0].Name)
-		myID = uint32(tempID)
+		tempID, err := strconv.Atoi(clientState.userDataBase.ClientUsers[0].Name)
+		clientState.myID = uint32(tempID)
 
 		//we have finished reading our id in and we have everything locally, we are good
 
@@ -174,12 +205,12 @@ func initJSON() {
 			log.Fatal(err)
 		}
 
-		myID = rand.Uint32()
+		clientState.myID = rand.Uint32()
 
 		//right my id to index 0, for safe keeping when we close and save.
-		userDataBase.ClientUsers[0] = Client{
+		clientState.userDataBase.ClientUsers[0] = Client{
 			false,
-			strconv.Itoa(int(myID)),
+			strconv.Itoa(int(clientState.myID)),
 		}
 
 		var name string
@@ -192,10 +223,12 @@ func initJSON() {
 			panic(err)
 		}
 
-		userDataBase.ClientUsers[myID] = Client{
+		clientState.userDataBase.ClientUsers[clientState.myID] = Client{
 			true,
 			name,
 		}
+
+		clientState.recentChanges.Store(true)
 
 		//TODO find a good way to periodically save data to a file
 		err = file.Close()
@@ -215,11 +248,11 @@ func initClient() {
 	//Here we are reading in the user hashmap from disk while connecting to servers concurrently
 	waitGroup.Go(initJSON)
 
-	senderChannel = make(chan InternalMessageData, 16)
-	receiverChannel = make(chan Message, 16)
+	clientState.senderChannel = make(chan InternalMessageData, 16)
+	clientState.receiverChannel = make(chan Message, 16)
 
 	for {
-		clientConn, err = net.Dial("tcp", port)
+		clientState.clientConn, err = net.Dial("tcp", port)
 
 		if err == nil {
 			break
@@ -251,7 +284,7 @@ func initGUI() {
 		if text == "" {
 			return
 		}
-		senderChannel <- InternalMessageData{
+		clientState.senderChannel <- InternalMessageData{
 			DATA_MESSAGE,
 			[]byte(text),
 		}
@@ -267,9 +300,11 @@ func clientMain() {
 
 	initClient()
 
+	// spawn all the relevant threads
 	go receiveMessage()
 	go sendMessage()
 	go receivedMessageManager()
+	go writeToClientSideJson()
 
 	if err := app.SetRoot(layout, true).Run(); err != nil {
 		panic(err)

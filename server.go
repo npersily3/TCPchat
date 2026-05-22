@@ -138,7 +138,7 @@ func getCurrentlyOnlineUsers() []byte {
 	return finalArray
 }
 
-// TODO read in or create a local json of names to client info, do not export the conn field or isOnline field
+// Every login, read in the json to data
 func initializeServerSideClientJson(id uint32) UserData {
 	fileName := "friendsList" + strconv.Itoa(int(id)) + ".json"
 
