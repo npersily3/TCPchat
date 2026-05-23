@@ -50,7 +50,6 @@ func receiveMessage() {
 }
 
 // pull messages off of the channel and prints them out
-// TODO run a benchmark and see if we should parrallelize this (array of channels)
 func receivedMessageManager() {
 
 	for {
@@ -108,7 +107,7 @@ func receivedMessageManager() {
 				newClient.isOnline = true
 				clientState.userDataBase.ClientUsers[senderId] = newClient
 
-				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s is online joined</span>`,
+				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s is online </span>`,
 					html.EscapeString(newClient.Name)))
 
 			case NEW_USER_WHO_WAS_ONLINE:
@@ -303,6 +302,16 @@ func initGUI() {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
+
+		guiHistoryMu.Lock()
+		snapshot := make([]string, len(guiHistory))
+		copy(snapshot, guiHistory)
+		guiHistoryMu.Unlock()
+		for _, msg := range snapshot {
+			fmt.Fprintf(w, "data: %s\n\n", msg)
+		}
+		flusher.Flush()
+
 		for {
 			select {
 			case msg := <-ch:
@@ -354,9 +363,21 @@ func clientMain() {
 var (
 	guiClients   = make(map[chan string]struct{})
 	guiClientsMu sync.Mutex
+
+	guiHistory   []string
+	guiHistoryMu sync.Mutex
 )
 
+const guiHistoryMax = 200
+
 func broadcastToGUI(htmlSnippet string) {
+	guiHistoryMu.Lock()
+	guiHistory = append(guiHistory, htmlSnippet)
+	if len(guiHistory) > guiHistoryMax {
+		guiHistory = guiHistory[len(guiHistory)-guiHistoryMax:]
+	}
+	guiHistoryMu.Unlock()
+
 	guiClientsMu.Lock()
 	defer guiClientsMu.Unlock()
 	for ch := range guiClients {

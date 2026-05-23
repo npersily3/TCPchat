@@ -68,10 +68,9 @@ func perClientReceiver(userId uint32, decoder *gob.Decoder) {
 }
 
 // This is a per client function that
-func perClientSender(userId uint32) {
+func perClientSender(userId uint32, encoder *gob.Encoder) {
 
 	info := serverUsers.ServerUsers[userId]
-	encoder := gob.NewEncoder(serverUsers.ServerUsers[userId].conn)
 
 	for {
 		// receive a message
@@ -107,6 +106,7 @@ func perClientSender(userId uint32) {
 			if err != nil {
 				panic(err)
 			}
+			continue
 
 		} else if !client.isOnline {
 
@@ -123,6 +123,7 @@ func perClientSender(userId uint32) {
 			if err != nil {
 				panic(err)
 			}
+			continue
 		}
 
 		err := encoder.Encode(message)
@@ -172,6 +173,7 @@ func handleConn(conn net.Conn) {
 	var clientInfo ClientInfo
 	var msg Message
 	decoder := gob.NewDecoder(conn)
+	encoder := gob.NewEncoder(conn)
 
 	//read in the starter to data the client sends
 	err := decoder.Decode(&msg)
@@ -202,26 +204,47 @@ func handleConn(conn net.Conn) {
 
 	for key, value := range serverUsers.ServerUsers {
 		if value.isOnline {
-			user, knownUser := clientInfo.UserDataBase.ClientUsers[key]
+
+			var msg Message
+			_, knownUser := clientInfo.UserDataBase.ClientUsers[key]
 
 			if knownUser {
-				clientInfo.channel <- Message{
+				msg = Message{
 					SenderId: key,
 					Payload: InternalMessageData{
 						OPcode:   EXISTING_USER,
 						Contents: nil,
 					},
 				}
-			} else {
-				name := user.Name
 
-				clientInfo.channel <- Message{
+				newClient := Client{
+					isOnline: true,
+					Name:     value.UserName,
+				}
+
+				clientInfo.UserDataBase.ClientUsers[key] = newClient
+
+			} else {
+				name := value.UserName
+
+				newClient := Client{
+					isOnline: true,
+					Name:     name,
+				}
+
+				clientInfo.UserDataBase.ClientUsers[key] = newClient
+
+				msg = Message{
 					SenderId: key,
 					Payload: InternalMessageData{
 						OPcode:   NEW_USER_WHO_WAS_ONLINE,
 						Contents: []byte(name),
 					},
 				}
+			}
+			err := encoder.Encode(msg)
+			if err != nil {
+				panic(err)
 			}
 		}
 	}
@@ -246,7 +269,7 @@ func handleConn(conn net.Conn) {
 	}
 
 	// now that the thread is initialized, we can launch the two new goroutines and exit
-	go perClientSender(clientInfo.userID)
+	go perClientSender(clientInfo.userID, encoder)
 	go perClientReceiver(clientInfo.userID, decoder)
 	go writeToPerClientJson(clientInfo.userID)
 }
