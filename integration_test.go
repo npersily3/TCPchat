@@ -1,23 +1,21 @@
 //go:build integration
 
-// This code is written by ai to test my program
+// Run with: go test -tags integration -v -count=1 -timeout 120s
+// To attach a debugger, use GoLand's "Integration Tests" run configuration in debug mode.
+// The server binary is built with -gcflags="all=-N -l" so you can step into it.
+
 package main
 
-// Run with: go test -tags integration -v -count=1
-// (count=1 prevents caching; tests share port :1000 so they must run sequentially)
-
 import (
-	"encoding/gob"
+	"fmt"
 	"math/rand"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
-
-// testBin holds the path to the binary built in TestMain.
-var testBin string
 
 func TestMain(m *testing.M) {
 	bin, err := os.CreateTemp("", "tcpchat-test-*.exe")
@@ -28,7 +26,13 @@ func TestMain(m *testing.M) {
 	testBin = bin.Name()
 	defer os.Remove(testBin)
 
-	out, buildErr := exec.Command("go", "build", "-o", testBin, ".").CombinedOutput()
+	// Disable optimizations and inlining so a debugger can step through server code.
+	out, buildErr := exec.Command(
+		"go", "build",
+		"-gcflags", "all=-N -l",
+		"-o", testBin,
+		".",
+	).CombinedOutput()
 	if buildErr != nil {
 		panic("build failed:\n" + string(out) + "\n" + buildErr.Error())
 	}
@@ -36,185 +40,273 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// spawnServer starts the server binary in a fresh temp directory so every test
-// gets its own data.json and friends-list files. Returns a cleanup func.
-func spawnServer(t *testing.T, extraArgs ...string) func() {
-	t.Helper()
+// TestFirstConnect verifies the first user to connect receives no unsolicited messages.
+func TestFirstConnect(t *testing.T) {
+	cleanup := spawnServer(t, t.TempDir())
+	defer cleanup()
+
+	alice := connect(t, rand.Uint32(), "alice")
+	defer alice.conn.Close()
+
+	msgs := alice.drain(5, 500*time.Millisecond)
+	if len(msgs) != 0 {
+		t.Errorf("first user should receive no initial messages; got %d: %+v", len(msgs), msgs)
+	}
+}
+
+// TestNoDoublePrint verifies that a joining user triggers exactly one notification per observer.
+// This is a regression test for the double-print bug caused by perClientSender
+// encoding both the intro message and the original NEW_USER_ONLINE.
+func TestNoDoublePrint(t *testing.T) {
+	cleanup := spawnServer(t, t.TempDir())
+	defer cleanup()
+
+	alice := connect(t, rand.Uint32(), "alice")
+	defer alice.conn.Close()
+	alice.drain(10, 500*time.Millisecond)
+
+	bob := connect(t, rand.Uint32(), "bob")
+	defer bob.conn.Close()
+
+	msgs := alice.drain(10, 2*time.Second)
+
+	count := 0
+	for _, m := range msgs {
+		if m.SenderId == bob.id {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 message from bob, got %d: %+v", count, msgs)
+	}
+}
+
+// TestNamePropagation verifies that NEW_USERNAME and NEW_USER_WHO_WAS_ONLINE carry the correct name.
+func TestNamePropagation(t *testing.T) {
+	cleanup := spawnServer(t, t.TempDir())
+	defer cleanup()
+
+	aliceID := rand.Uint32()
+	alice := connect(t, aliceID, "alice")
+	defer alice.conn.Close()
+	alice.drain(10, 500*time.Millisecond)
+
+	bobID := rand.Uint32()
+	bob := connect(t, bobID, "bob")
+	defer bob.conn.Close()
+
+	// Alice receives NEW_USERNAME for Bob via perClientSender.
+	aliceMsgs := alice.drain(5, 2*time.Second)
+	var aliceGotName bool
+	for _, m := range aliceMsgs {
+		if m.SenderId == bobID && m.Payload.OPcode == NEW_USERNAME {
+			got := string(m.Payload.Contents)
+			if got == "bob" {
+				aliceGotName = true
+			} else {
+				t.Errorf("NEW_USERNAME for bob: want %q, got %q", "bob", got)
+			}
+		}
+	}
+	if !aliceGotName {
+		t.Errorf("alice did not receive NEW_USERNAME for bob; got: %+v", aliceMsgs)
+	}
+
+	// Bob receives NEW_USER_WHO_WAS_ONLINE for Alice via handleConn's direct encoder.
+	bobMsgs := bob.drain(5, 2*time.Second)
+	var bobGotName bool
+	for _, m := range bobMsgs {
+		if m.SenderId == aliceID && m.Payload.OPcode == NEW_USER_WHO_WAS_ONLINE {
+			got := string(m.Payload.Contents)
+			if got == "alice" {
+				bobGotName = true
+			} else {
+				t.Errorf("NEW_USER_WHO_WAS_ONLINE for alice: want %q, got %q", "alice", got)
+			}
+		}
+	}
+	if !bobGotName {
+		t.Errorf("bob did not receive NEW_USER_WHO_WAS_ONLINE for alice; got: %+v", bobMsgs)
+	}
+}
+
+// TestJSONPersistence verifies that friend-lists survive a server restart (EXISTING_USER),
+// and that deleting a user's JSON resets their view to NEW_USER_WHO_WAS_ONLINE.
+//
+// Note: Alice must connect first in session 1 so Bob's join goes through her perClientSender,
+// which is the only code path that sets recentChanges and triggers the JSON flush.
+// This test takes ~5 s for the JSON flush wait.
+func TestJSONPersistence(t *testing.T) {
 	dir := t.TempDir()
 
-	args := append([]string{"-mode=server"}, extraArgs...)
-	cmd := exec.Command(testBin, args...)
-	cmd.Dir = dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	aliceID := uint32(10001)
+	bobID := uint32(10002)
 
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("spawnServer: %v", err)
-	}
+	// ── Session 1: establish Alice's friend-list with Bob ──────────────────
+	cleanup := spawnServer(t, dir)
 
-	// Poll until the port is accepting connections (up to 3 s).
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", "127.0.0.1"+port, 50*time.Millisecond)
-		if err == nil {
-			c.Close()
-			return func() { cmd.Process.Kill() }
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	alice := connect(t, aliceID, "alice")
+	alice.drain(5, 500*time.Millisecond) // first user; no messages expected
 
-	cmd.Process.Kill()
-	t.Fatal("spawnServer: did not become ready within 3 s")
-	return nil
-}
+	bob := connect(t, bobID, "bob")
+	bob.drain(5, 500*time.Millisecond) // drains NEW_USER_WHO_WAS_ONLINE for Alice
 
-// rawClient wraps a TCP connection to the server with a gob encoder/decoder.
-type rawClient struct {
-	id   uint32
-	name string
-	conn net.Conn
-	enc  *gob.Encoder
-	dec  *gob.Decoder
-}
-
-// connect dials the server and sends the initial handshake message.
-func connect(t *testing.T, name string) *rawClient {
-	t.Helper()
-	conn, err := net.Dial("tcp", "127.0.0.1"+port)
-	if err != nil {
-		t.Fatalf("connect %q: %v", name, err)
-	}
-	c := &rawClient{
-		id:   rand.Uint32(),
-		name: name,
-		conn: conn,
-		enc:  gob.NewEncoder(conn),
-		dec:  gob.NewDecoder(conn),
-	}
-	if err := c.enc.Encode(Message{
-		SenderId: c.id,
-		Payload:  InternalMessageData{OPcode: DATA_MESSAGE, Contents: []byte(name)},
-	}); err != nil {
-		conn.Close()
-		t.Fatalf("connect %q: handshake encode: %v", name, err)
-	}
-	return c
-}
-
-// drain reads up to n messages, stopping when the deadline expires or a decode
-// error occurs. Safe to call multiple times.
-func (c *rawClient) drain(n int, timeout time.Duration) []Message {
-	deadline := time.Now().Add(timeout)
-	var msgs []Message
-	for len(msgs) < n {
-		c.conn.SetReadDeadline(deadline)
-		var m Message
-		if err := c.dec.Decode(&m); err != nil {
-			break
-		}
-		msgs = append(msgs, m)
-	}
-	c.conn.SetReadDeadline(time.Time{})
-	return msgs
-}
-
-// send encodes a DATA_MESSAGE to the server.
-func (c *rawClient) send(t *testing.T, text string) {
-	t.Helper()
-	if err := c.enc.Encode(Message{
-		SenderId: c.id,
-		Payload:  InternalMessageData{OPcode: DATA_MESSAGE, Contents: []byte(text)},
-	}); err != nil {
-		t.Fatalf("%s send: %v", c.name, err)
-	}
-}
-
-func hasOpcode(msgs []Message, op int) bool {
-	for _, m := range msgs {
-		if m.Payload.OPcode == op {
-			return true
-		}
-	}
-	return false
-}
-
-// TestHandshake: a single client connects and receives the expected initial opcodes.
-func TestHandshake(t *testing.T) {
-	cleanup := spawnServer(t)
-	defer cleanup()
-
-	alice := connect(t, "alice")
-	defer alice.conn.Close()
-
-	msgs := alice.drain(5, 2*time.Second)
-
-	if !hasOpcode(msgs, NEW_USERNAME) {
-		t.Errorf("expected NEW_USERNAME in initial messages; got %+v", msgs)
-	}
-	if !hasOpcode(msgs, NEW_USER_ONLINE) {
-		t.Errorf("expected NEW_USER_ONLINE in initial messages; got %+v", msgs)
-	}
-}
-
-// TestNewUserNotification: when bob connects, alice should receive NEW_USER_ONLINE with bob's ID.
-func TestNewUserNotification(t *testing.T) {
-	cleanup := spawnServer(t)
-	defer cleanup()
-
-	alice := connect(t, "alice")
-	defer alice.conn.Close()
-	alice.drain(5, time.Second) // discard alice's own join messages
-
-	bob := connect(t, "bob")
-	defer bob.conn.Close()
-
-	msgs := alice.drain(5, 2*time.Second)
-	var gotBobOnline bool
-	for _, m := range msgs {
-		if m.Payload.OPcode == NEW_USER_ONLINE && m.SenderId == bob.id {
-			gotBobOnline = true
-		}
-	}
-	if !gotBobOnline {
-		t.Errorf("alice did not receive NEW_USER_ONLINE for bob (id=%d); got: %+v", bob.id, msgs)
-	}
-}
-
-// TestMessageBroadcast: alice sends a message; bob receives a DATA_MESSAGE with the exact text.
-func TestMessageBroadcast(t *testing.T) {
-	cleanup := spawnServer(t)
-	defer cleanup()
-
-	alice := connect(t, "alice")
-	defer alice.conn.Close()
+	// Drain Alice's NEW_USERNAME for Bob so her perClientSender runs and sets recentChanges.
 	alice.drain(5, time.Second)
 
-	bob := connect(t, "bob")
-	defer bob.conn.Close()
-	bob.drain(5, time.Second)
+	t.Log("waiting 5 s for JSON flush (writeToPerClientJson fires at ~4 s)...")
+	time.Sleep(5 * time.Second)
 
-	// Let bob's join propagate and drain alice's notification about it.
+	cleanup()
+	alice.conn.Close()
+	bob.conn.Close()
+	time.Sleep(200 * time.Millisecond) // let OS release the port
+
+	// ── Session 2: Alice's JSON has Bob → she receives EXISTING_USER ───────
+	cleanup2 := spawnServer(t, dir)
+
+	bob2 := connect(t, bobID, "bob")
+	bob2.drain(5, 500*time.Millisecond) // no one online yet
+
+	// Alice connects second; her JSON has Bob who is now online.
+	alice2 := connect(t, aliceID, "alice")
+	aliceMsgs2 := alice2.drain(5, 2*time.Second)
+
+	var gotExistingUser bool
+	for _, m := range aliceMsgs2 {
+		if m.SenderId == bobID && m.Payload.OPcode == EXISTING_USER {
+			gotExistingUser = true
+		}
+	}
+	if !gotExistingUser {
+		t.Errorf("session 2: alice expected EXISTING_USER for bob (JSON intact); got %+v", aliceMsgs2)
+	}
+
+	cleanup2()
+	alice2.conn.Close()
+	bob2.conn.Close()
+	time.Sleep(200 * time.Millisecond)
+
+	// ── Session 3: delete Alice's JSON → she receives NEW_USER_WHO_WAS_ONLINE ─
+	jsonPath := filepath.Join(dir, fmt.Sprintf("friendsList%d.json", aliceID))
+	if err := os.Remove(jsonPath); err != nil {
+		t.Fatalf("remove alice JSON: %v", err)
+	}
+
+	cleanup3 := spawnServer(t, dir)
+	defer cleanup3()
+
+	bob3 := connect(t, bobID, "bob")
+	defer bob3.conn.Close()
+	bob3.drain(5, 500*time.Millisecond)
+
+	alice3 := connect(t, aliceID, "alice") // fresh empty DB; Bob is online
+	defer alice3.conn.Close()
+	aliceMsgs3 := alice3.drain(5, 2*time.Second)
+
+	var gotWasOnline bool
+	for _, m := range aliceMsgs3 {
+		if m.SenderId == bobID && m.Payload.OPcode == NEW_USER_WHO_WAS_ONLINE {
+			gotWasOnline = true
+		}
+	}
+	if !gotWasOnline {
+		t.Errorf("session 3: alice expected NEW_USER_WHO_WAS_ONLINE for bob (JSON deleted); got %+v", aliceMsgs3)
+	}
+}
+
+// TestMessageOrdering verifies that messages from a single sender arrive in sent order.
+func TestMessageOrdering(t *testing.T) {
+	cleanup := spawnServer(t, t.TempDir())
+	defer cleanup()
+
+	alice := connect(t, rand.Uint32(), "alice")
+	defer alice.conn.Close()
+
+	bob := connect(t, rand.Uint32(), "bob")
+	defer bob.conn.Close()
+
+	// Drain initial notifications so channels are clear before sending test messages.
+	alice.drain(10, time.Second)
+	bob.drain(10, time.Second)
 	time.Sleep(100 * time.Millisecond)
 	alice.drain(5, 200*time.Millisecond)
 
-	const payload = "hello from alice"
-	alice.send(t, payload)
+	const n = 20
+	for i := 0; i < n; i++ {
+		alice.send(t, fmt.Sprintf("msg-%02d", i))
+	}
 
-	msgs := bob.drain(5, 3*time.Second)
-	var found bool
+	msgs := bob.drain(n+5, 5*time.Second)
+
+	var received []string
 	for _, m := range msgs {
-		if m.Payload.OPcode == DATA_MESSAGE && string(m.Payload.Contents) == payload {
-			found = true
+		if m.SenderId == alice.id && m.Payload.OPcode == DATA_MESSAGE {
+			received = append(received, string(m.Payload.Contents))
 		}
 	}
-	if !found {
-		t.Errorf("bob did not receive %q; got: %+v", payload, msgs)
+	if len(received) != n {
+		t.Errorf("expected %d messages from alice, got %d: %v", n, len(received), received)
+		return
+	}
+	for i, text := range received {
+		want := fmt.Sprintf("msg-%02d", i)
+		if text != want {
+			t.Errorf("message[%d]: want %q, got %q", i, want, text)
+		}
 	}
 }
 
-// TestServerWithPprof: server starts with -pprof and the endpoint becomes reachable.
+// TestMediumScale runs 15 concurrent users sending 5 messages each and verifies
+// the server survives by accepting a probe connection with proper initial messages.
+func TestMediumScale(t *testing.T) {
+	cleanup := spawnServer(t, t.TempDir())
+	defer cleanup()
+
+	const numUsers = 15
+	const msgsPerUser = 5
+
+	users := make([]*rawClient, numUsers)
+	for i := 0; i < numUsers; i++ {
+		users[i] = connect(t, rand.Uint32(), fmt.Sprintf("user-%02d", i))
+		time.Sleep(100 * time.Millisecond)
+	}
+	defer func() {
+		for _, u := range users {
+			u.conn.Close()
+		}
+	}()
+
+	time.Sleep(2 * time.Second)
+	for _, u := range users {
+		u.drain(200, 100*time.Millisecond)
+	}
+
+	for i, u := range users {
+		for j := 0; j < msgsPerUser; j++ {
+			u.send(t, fmt.Sprintf("u%02d-msg%02d", i, j))
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	time.Sleep(3 * time.Second)
+	for _, u := range users {
+		u.drain(500, 100*time.Millisecond)
+	}
+
+	// Probe verifies the server is still alive and sends one message per online user.
+	probe := connect(t, rand.Uint32(), "probe")
+	defer probe.conn.Close()
+	probeStartMsgs := probe.drain(numUsers+5, 3*time.Second)
+	if len(probeStartMsgs) < numUsers {
+		t.Errorf("probe received %d initial messages, want at least %d (one per online user)",
+			len(probeStartMsgs), numUsers)
+	}
+}
+
+// TestServerWithPprof verifies that the -pprof flag starts an HTTP server.
 func TestServerWithPprof(t *testing.T) {
-	cleanup := spawnServer(t, "-pprof=:16060")
+	cleanup := spawnServer(t, t.TempDir(), "-pprof=:16060")
 	defer cleanup()
 
 	deadline := time.Now().Add(3 * time.Second)

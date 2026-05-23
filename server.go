@@ -44,7 +44,7 @@ func perClientReceiver(userId uint32, decoder *gob.Decoder) {
 		err := decoder.Decode(&msg)
 
 		if err != nil {
-			panic(err)
+			return
 		}
 
 		fmt.Printf("%+v \n", msg)
@@ -179,7 +179,7 @@ func handleConn(conn net.Conn) {
 	err := decoder.Decode(&msg)
 
 	if err != nil {
-		panic(err)
+		return
 	}
 
 	fmt.Printf("firstMessage: %+v\n", msg)
