@@ -5,17 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 type ClientGlobalData struct {
@@ -63,6 +63,8 @@ func receivedMessageManager() {
 
 			client, isInitialized := clientState.userDataBase.ClientUsers[senderId]
 
+			fmt.Printf("%+v \n", msg)
+
 			switch opCode {
 
 			case DATA_MESSAGE:
@@ -74,9 +76,9 @@ func receivedMessageManager() {
 					panic("client not online")
 				}
 
-				app.QueueUpdateDraw(func() {
-					fmt.Fprintf(msgView, "[green]%s[-]: %s\n", client.Name, msg.Payload.Contents)
-				})
+				broadcastToGUI(fmt.Sprintf(`<span class="name">%s</span>: %s`,
+					html.EscapeString(client.Name),
+					html.EscapeString(string(msg.Payload.Contents))))
 			case NEW_USER_ONLINE:
 
 				if !isInitialized {
@@ -88,9 +90,8 @@ func receivedMessageManager() {
 
 				client.isOnline = true
 
-				app.QueueUpdateDraw(func() {
-					fmt.Fprintf(msgView, "[yellow]%s joined[-]\n", client.Name)
-				})
+				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s joined</span>`,
+					html.EscapeString(client.Name)))
 
 				// do not update the json, because the only field changed only pertains to the current state
 				clientState.userDataBase.ClientUsers[senderId] = client
@@ -102,9 +103,25 @@ func receivedMessageManager() {
 				clientState.userDataBase.ClientUsers[senderId] = newClient
 				clientState.recentChanges.Store(true)
 
-				app.QueueUpdateDraw(func() {
-					fmt.Fprintf(msgView, "[yellow]%s is a new user who joined[-]\n", userName)
-				})
+				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s is a new user who joined</span>`,
+					html.EscapeString(userName)))
+
+			case EXISTING_USER:
+				newClient := clientState.userDataBase.ClientUsers[senderId]
+				newClient.isOnline = true
+				clientState.userDataBase.ClientUsers[senderId] = newClient
+
+				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s is online joined</span>`,
+					html.EscapeString(newClient.Name)))
+
+			case NEW_USER_WHO_WAS_ONLINE:
+				userName := string(msg.Payload.Contents)
+				newClient := Client{isOnline: true, Name: userName}
+				clientState.userDataBase.ClientUsers[senderId] = newClient
+				clientState.recentChanges.Store(true)
+
+				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s is a new user who was online before you</span>`,
+					html.EscapeString(userName)))
 
 			default:
 				panic("unknown opcode")
@@ -262,35 +279,66 @@ func initClient() {
 }
 
 func initGUI() {
-	app = tview.NewApplication()
+	mux := http.NewServeMux()
 
-	msgView = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetChangedFunc(func() { app.Draw() })
-	msgView.SetBorder(true).SetTitle(" Messages ")
-
-	inputField := tview.NewInputField().
-		SetLabel("> ").
-		SetFieldBackgroundColor(tcell.ColorDefault)
-	inputField.SetDoneFunc(func(key tcell.Key) {
-		if key != tcell.KeyEnter {
-			return
-		}
-		text := inputField.GetText()
-		if text == "" {
-			return
-		}
-		clientState.senderChannel <- InternalMessageData{
-			DATA_MESSAGE,
-			[]byte(text),
-		}
-		inputField.SetText("")
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, chatHTML)
 	})
 
-	layout = tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(msgView, 0, 1, false).
-		AddItem(inputField, 3, 0, true)
+	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		ch := make(chan string, 32)
+		guiClientsMu.Lock()
+		guiClients[ch] = struct{}{}
+		guiClientsMu.Unlock()
+		defer func() {
+			guiClientsMu.Lock()
+			delete(guiClients, ch)
+			guiClientsMu.Unlock()
+		}()
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		for {
+			select {
+			case msg := <-ch:
+				fmt.Fprintf(w, "data: %s\n\n", msg)
+				flusher.Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
+
+	mux.HandleFunc("/send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if text := r.FormValue("m"); text != "" {
+			myName := clientState.userDataBase.ClientUsers[clientState.myID].Name
+			clientState.senderChannel <- InternalMessageData{DATA_MESSAGE, []byte(text)}
+			broadcastToGUI(fmt.Sprintf(`<span class="name">%s</span>: %s`,
+				html.EscapeString(myName),
+				html.EscapeString(text)))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	addr := "localhost:" + cfg.GUIPort
+	log.Printf("Chat UI → http://%s", addr)
+	go func() {
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Fatal(err)
+		}
+	}()
 }
 
 func clientMain() {
@@ -303,11 +351,62 @@ func clientMain() {
 	go receivedMessageManager()
 	go writeToClientSideJson()
 
-	if err := app.SetRoot(layout, true).Run(); err != nil {
-		panic(err)
+	select {} // goroutines handle everything; keep main alive
+}
+
+var (
+	guiClients   = make(map[chan string]struct{})
+	guiClientsMu sync.Mutex
+)
+
+func broadcastToGUI(htmlSnippet string) {
+	guiClientsMu.Lock()
+	defer guiClientsMu.Unlock()
+	for ch := range guiClients {
+		select {
+		case ch <- htmlSnippet:
+		default:
+		}
 	}
 }
 
-var app *tview.Application
-var msgView *tview.TextView
-var layout *tview.Flex
+const chatHTML = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>TCPChat</title>
+<style>
+  body{font-family:monospace;margin:0;padding:10px;background:#1e1e1e;color:#d4d4d4;display:flex;flex-direction:column;height:100vh;box-sizing:border-box}
+  #msgs{flex:1;overflow-y:auto;border:1px solid #444;padding:8px;margin-bottom:8px}
+  #row{display:flex;gap:6px}
+  #inp{flex:1;background:#2d2d2d;color:#d4d4d4;border:1px solid #555;padding:6px;font-family:monospace;font-size:14px}
+  button{background:#0e639c;color:#fff;border:none;padding:6px 14px;cursor:pointer;font-size:14px}
+  .sys{color:#dcdcaa}
+  .name{color:#4ec9b0;font-weight:bold}
+</style>
+</head>
+<body>
+<div id="msgs"></div>
+<div id="row">
+  <input id="inp" type="text" placeholder="Type a message…" autofocus>
+  <button onclick="send()">Send</button>
+</div>
+<script>
+const msgs=document.getElementById('msgs');
+const inp=document.getElementById('inp');
+new EventSource('/events').onmessage=e=>{
+  const d=document.createElement('div');
+  d.innerHTML=e.data;
+  msgs.appendChild(d);
+  msgs.scrollTop=msgs.scrollHeight;
+};
+function send(){
+  const t=inp.value.trim();
+  if(!t)return;
+  fetch('/send',{method:'POST',body:new URLSearchParams({m:t})});
+  inp.value='';
+}
+inp.onkeydown=e=>{if(e.key==='Enter')send();};
+</script>
+</body>
+</html>`

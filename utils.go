@@ -1,7 +1,8 @@
 package main
 
-//list of opcodes to communicate with
-
+// list of opcodes to communicate with
+const NEW_USER_WHO_WAS_ONLINE = 4
+const EXISTING_USER = 3
 const NEW_USER_ONLINE = 2
 const NEW_USERNAME = 1
 const DATA_MESSAGE = 0

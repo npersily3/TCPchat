@@ -14,6 +14,7 @@ type Config struct {
 	PProfAddr string
 	Headless  bool
 	Name      string
+	GUIPort   string
 }
 
 const port = ":1000"
@@ -28,6 +29,7 @@ func main() {
 	pprofAddr := flag.String("pprof", "", "start pprof HTTP server on this addr, e.g. :6060")
 	headless := flag.Bool("headless", false, "client: disable TUI, write to stdout (for testing/scripting)")
 	name := flag.String("name", "", "client: username; skips interactive prompt when set")
+	guiPort := flag.String("gui-port", "8080", "client: port for the browser chat UI")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -47,6 +49,7 @@ func main() {
 		PProfAddr: *pprofAddr,
 		Headless:  *headless,
 		Name:      *name,
+		GUIPort:   *guiPort,
 	}
 
 	if *mode == "server" {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -47,6 +46,8 @@ func perClientReceiver(userId uint32, decoder *gob.Decoder) {
 		if err != nil {
 			panic(err)
 		}
+
+		fmt.Printf("%+v \n", msg)
 
 		// allocate a space where the message can live
 		//This prevents the msg variable from being overwritten
@@ -100,6 +101,7 @@ func perClientSender(userId uint32) {
 					Contents: []byte(senderName),
 				},
 			}
+			fmt.Printf("%+v \n", serverMessage)
 			err := encoder.Encode(serverMessage)
 
 			if err != nil {
@@ -111,10 +113,11 @@ func perClientSender(userId uint32) {
 			serverMessage := Message{
 				SenderId: senderID,
 				Payload: InternalMessageData{
-					OPcode:   NEW_USERNAME,
+					OPcode:   NEW_USER_ONLINE,
 					Contents: nil,
 				},
 			}
+			fmt.Printf("%+v \n", serverMessage)
 			err := encoder.Encode(serverMessage)
 
 			if err != nil {
@@ -133,31 +136,11 @@ func perClientSender(userId uint32) {
 	}
 }
 
-func getCurrentlyOnlineUsers() []byte {
-
-	finalArray := []byte{}
-
-	localArray := make([]byte, 4)
-
-	for key, value := range serverUsers.ServerUsers {
-		if value.isOnline {
-			binary.BigEndian.PutUint32(localArray, key)
-			finalArray = append(finalArray, localArray...)
-		}
-
-	}
-
-	return finalArray
-}
-
 // Every login, read in the json to data
 func initializeServerSideClientJson(id uint32, database *UserData) {
 	fileName := filepath.Join(cfg.DataDir, "friendsList"+strconv.Itoa(int(id))+".json")
 
 	_, err := os.Stat(fileName)
-
-	//instantiate local database
-	serverUsers.ServerUsers[id] = ClientInfo{}
 
 	// If the file exists
 	if err == nil {
@@ -203,41 +186,53 @@ func handleConn(conn net.Conn) {
 
 	_, ok := serverUsers.ServerUsers[clientInfo.userID]
 
+	//initialize all the temporary client objects
 	clientInfo.conn = conn
+	clientInfo.recentChanges = new(atomic.Bool)
+	clientInfo.channel = make(chan Message, 16)
+	clientInfo.isOnline = true
+	clientInfo.UserDataBase.ClientUsers = make(map[uint32]Client)
+	clientInfo.UserName = string(msg.Payload.Contents)
+	initializeServerSideClientJson(clientInfo.userID, &clientInfo.UserDataBase)
+
 	// if we exist in the hashmap (have been online before
-	if ok {
+	if !ok {
 
-		// if  we are a new user,
-	} else {
-
-		// initialize user name and channel, then add to hashmap
-
-		clientInfo.UserName = string(msg.Payload.Contents)
-		clientInfo.channel = make(chan Message, 16)
-		clientInfo.isOnline = true
-		clientInfo.recentChanges = new(atomic.Bool)
-		clientInfo.UserDataBase.ClientUsers = make(map[uint32]Client)
-		initializeServerSideClientJson(clientInfo.userID, &clientInfo.UserDataBase)
-		var otherActiveUsers []byte = getCurrentlyOnlineUsers()
 		// send back the current list of users
 		// this line has to be in this exact location, because we need the channel to exist, but we cannot be in the hashmap yet, so there is no race condtion
 		// this message will always be the first one recieved back
-
-		//TODO think about a race condition where someone goes online here and just lurks,
 		//they will not know we are online because we are not identified as online, and we will not know if they are online
-		clientInfo.channel <- Message{
-			SenderId: clientInfo.userID,
-			Payload: InternalMessageData{
-				OPcode:   NEW_USERNAME,
-				Contents: otherActiveUsers,
-			},
+
+		for key, value := range serverUsers.ServerUsers {
+			if value.isOnline {
+				user, knownUser := clientInfo.UserDataBase.ClientUsers[key]
+
+				if knownUser {
+					clientInfo.channel <- Message{
+						SenderId: key,
+						Payload: InternalMessageData{
+							OPcode:   EXISTING_USER,
+							Contents: nil,
+						},
+					}
+				} else {
+					name := user.Name
+
+					clientInfo.channel <- Message{
+						SenderId: key,
+						Payload: InternalMessageData{
+							OPcode:   NEW_USER_WHO_WAS_ONLINE,
+							Contents: []byte(name),
+						},
+					}
+				}
+			}
 		}
 
+		// This line has to be here because if this line was after us and we were a new user, nobody would know our name
 		serverUsers.ServerUsers[clientInfo.userID] = clientInfo
-		serverRecentChanges.Store(true)
 
-		// send a message to everyone of our username and id, since this message will inevitably be sent back to us
-		// it also serves as an acknowledgment
+		// send a message to everyone of our id, they will internally check if the know us
 		initialMessage := Message{
 			SenderId: clientInfo.userID,
 			Payload: InternalMessageData{
@@ -249,6 +244,10 @@ func handleConn(conn net.Conn) {
 
 		// send a message back of all the current users ids->name
 
+	}
+
+	if !ok {
+		serverRecentChanges.Store(true)
 	}
 
 	// now that the thread is initialized, we can launch the two new goroutines and exit
