@@ -195,56 +195,51 @@ func handleConn(conn net.Conn) {
 	clientInfo.UserName = string(msg.Payload.Contents)
 	initializeServerSideClientJson(clientInfo.userID, &clientInfo.UserDataBase)
 
-	// if we exist in the hashmap (have been online before
-	if !ok {
+	// send back the current list of users
+	// this line has to be in this exact location, because we need the channel to exist, but we cannot be in the hashmap yet, so there is no race condtion
+	// this message will always be the first one recieved back
+	//they will not know we are online because we are not identified as online, and we will not know if they are online
 
-		// send back the current list of users
-		// this line has to be in this exact location, because we need the channel to exist, but we cannot be in the hashmap yet, so there is no race condtion
-		// this message will always be the first one recieved back
-		//they will not know we are online because we are not identified as online, and we will not know if they are online
+	for key, value := range serverUsers.ServerUsers {
+		if value.isOnline {
+			user, knownUser := clientInfo.UserDataBase.ClientUsers[key]
 
-		for key, value := range serverUsers.ServerUsers {
-			if value.isOnline {
-				user, knownUser := clientInfo.UserDataBase.ClientUsers[key]
+			if knownUser {
+				clientInfo.channel <- Message{
+					SenderId: key,
+					Payload: InternalMessageData{
+						OPcode:   EXISTING_USER,
+						Contents: nil,
+					},
+				}
+			} else {
+				name := user.Name
 
-				if knownUser {
-					clientInfo.channel <- Message{
-						SenderId: key,
-						Payload: InternalMessageData{
-							OPcode:   EXISTING_USER,
-							Contents: nil,
-						},
-					}
-				} else {
-					name := user.Name
-
-					clientInfo.channel <- Message{
-						SenderId: key,
-						Payload: InternalMessageData{
-							OPcode:   NEW_USER_WHO_WAS_ONLINE,
-							Contents: []byte(name),
-						},
-					}
+				clientInfo.channel <- Message{
+					SenderId: key,
+					Payload: InternalMessageData{
+						OPcode:   NEW_USER_WHO_WAS_ONLINE,
+						Contents: []byte(name),
+					},
 				}
 			}
 		}
-
-		// This line has to be here because if this line was after us and we were a new user, nobody would know our name
-		serverUsers.ServerUsers[clientInfo.userID] = clientInfo
-
-		// send a message to everyone of our id, they will internally check if the know us
-		initialMessage := Message{
-			SenderId: clientInfo.userID,
-			Payload: InternalMessageData{
-				OPcode:   NEW_USER_ONLINE,
-				Contents: nil,
-			},
-		}
-		globalChannel <- initialMessage
-
-		// send a message back of all the current users ids->name
-
 	}
+
+	// This line has to be here because if this line was after us and we were a new user, nobody would know our name
+	serverUsers.ServerUsers[clientInfo.userID] = clientInfo
+
+	// send a message to everyone of our id, they will internally check if the know us
+	initialMessage := Message{
+		SenderId: clientInfo.userID,
+		Payload: InternalMessageData{
+			OPcode:   NEW_USER_ONLINE,
+			Contents: nil,
+		},
+	}
+	globalChannel <- initialMessage
+
+	// send a message back of all the current users ids->name
 
 	if !ok {
 		serverRecentChanges.Store(true)

@@ -84,9 +84,6 @@ func receivedMessageManager() {
 				if !isInitialized {
 					panic("uninitialized client")
 				}
-				if client.isOnline {
-					panic("client online")
-				}
 
 				client.isOnline = true
 
