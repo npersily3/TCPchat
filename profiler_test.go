@@ -25,8 +25,8 @@ func TestMain(m *testing.M) {
 	testBin = bin.Name()
 	defer os.Remove(testBin)
 
-	// Optimizations enabled for accurate profiling.
-	out, buildErr := exec.Command("go", "build", "-o", testBin, ".").CombinedOutput()
+	// -a bypasses the build cache so source changes are always picked up.
+	out, buildErr := exec.Command("go", "build", "-a", "-o", testBin, ".").CombinedOutput()
 	if buildErr != nil {
 		panic("build failed:\n" + string(out) + "\n" + buildErr.Error())
 	}

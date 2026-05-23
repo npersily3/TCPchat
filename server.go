@@ -35,7 +35,7 @@ var serverRecentChanges atomic.Bool
 // channel for all serverUsers to push messages
 var globalChannel chan Message
 
-// This is a go routine that reads messages in and pushes them up to a big channel
+// This is a go routine that reads messages in and pushes them up to a big channel to be sent to everyone else
 func perClientReceiver(userId uint32, decoder *gob.Decoder) {
 
 	for {
@@ -47,7 +47,7 @@ func perClientReceiver(userId uint32, decoder *gob.Decoder) {
 			return
 		}
 
-		fmt.Printf("%+v \n", msg)
+		//		fmt.Printf("Server recieved messages: %+v \n", msg)
 
 		// allocate a space where the message can live
 		//This prevents the msg variable from being overwritten
@@ -117,7 +117,7 @@ func perClientSender(userId uint32, encoder *gob.Encoder) {
 					Contents: nil,
 				},
 			}
-			fmt.Printf("%+v \n", serverMessage)
+			fmt.Printf("Serverside message: %+v \n", serverMessage)
 			err := encoder.Encode(serverMessage)
 
 			if err != nil {
@@ -398,7 +398,8 @@ func serverMain() {
 		message, ok := <-globalChannel
 
 		if ok {
-			go sendMessageToEveryOne(message)
+			fmt.Printf("Global Channel: %+v \n", message)
+			sendMessageToEveryOne(message)
 		}
 	}
 

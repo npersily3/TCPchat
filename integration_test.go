@@ -26,9 +26,11 @@ func TestMain(m *testing.M) {
 	testBin = bin.Name()
 	defer os.Remove(testBin)
 
-	// Disable optimizations and inlining so a debugger can step through server code.
+	// -a bypasses the build cache so source changes are always picked up.
+	// Optimizations and inlining are disabled for debugger attachment.
 	out, buildErr := exec.Command(
 		"go", "build",
+		"-a",
 		"-gcflags", "all=-N -l",
 		"-o", testBin,
 		".",

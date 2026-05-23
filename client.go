@@ -57,12 +57,11 @@ func receivedMessageManager() {
 
 		// if there is a message
 		if ok {
+			fmt.Printf("Received message: %+v \n", msg)
 			senderId := msg.SenderId
 			opCode := msg.Payload.OPcode
 
 			client, isInitialized := clientState.userDataBase.ClientUsers[senderId]
-
-			fmt.Printf("%+v \n", msg)
 
 			switch opCode {
 
