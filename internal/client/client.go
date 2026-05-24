@@ -1,4 +1,4 @@
-package main
+package client
 
 import (
 	"encoding/gob"
@@ -16,184 +16,137 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"TCPchat/internal/shared"
 )
 
 type ClientGlobalData struct {
-	userDataBase    UserData
+	userDataBase    shared.UserData
 	myID            uint32
-	senderChannel   chan InternalMessageData
-	receiverChannel chan Message
+	senderChannel   chan shared.InternalMessageData
+	receiverChannel chan shared.Message
 	clientConn      net.Conn
 	recentChanges   atomic.Bool
 }
 
 var clientState ClientGlobalData
 
-// Recieves message from server, decodes it, and pushes it to the channel
 func receiveMessage() {
-
 	decoder := gob.NewDecoder(clientState.clientConn)
-
 	for {
-		// recieve a message
-		var msg Message
-
+		var msg shared.Message
 		err := decoder.Decode(&msg)
-
 		if err != nil {
 			println(err.Error())
 			return
 		}
-
 		clientState.receiverChannel <- msg
 	}
 }
 
-// pull messages off of the channel and prints them out
 func receivedMessageManager() {
-
 	for {
 		msg, ok := <-clientState.receiverChannel
-
-		// if there is a message
 		if ok {
 			fmt.Printf("Received message: %+v \n", msg)
 			senderId := msg.SenderId
 			opCode := msg.Payload.OPcode
-
 			client, isInitialized := clientState.userDataBase.ClientUsers[senderId]
 
 			switch opCode {
-
-			case DATA_MESSAGE:
-
+			case shared.DATA_MESSAGE:
 				if !isInitialized {
 					panic("uninitialized client")
 				}
-				if !client.isOnline {
+				if !client.IsOnline {
 					panic("client not online")
 				}
-
 				broadcastToGUI(fmt.Sprintf(`<span class="name">%s</span>: %s`,
 					html.EscapeString(client.Name),
 					html.EscapeString(string(msg.Payload.Contents))))
-			case NEW_USER_ONLINE:
 
+			case shared.NEW_USER_ONLINE:
 				if !isInitialized {
 					panic("uninitialized client")
 				}
-
-				client.isOnline = true
-
+				client.IsOnline = true
 				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s joined</span>`,
 					html.EscapeString(client.Name)))
-
-				// do not update the json, because the only field changed only pertains to the current state
 				clientState.userDataBase.ClientUsers[senderId] = client
 
-			// this is also new
-			case NEW_USERNAME:
+			case shared.NEW_USERNAME:
 				userName := string(msg.Payload.Contents)
-				newClient := Client{isOnline: true, Name: userName}
+				newClient := shared.Client{IsOnline: true, Name: userName}
 				clientState.userDataBase.ClientUsers[senderId] = newClient
 				clientState.recentChanges.Store(true)
-
 				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s is a new user who joined</span>`,
 					html.EscapeString(userName)))
 
-			case EXISTING_USER:
+			case shared.EXISTING_USER:
 				newClient := clientState.userDataBase.ClientUsers[senderId]
-				newClient.isOnline = true
+				newClient.IsOnline = true
 				clientState.userDataBase.ClientUsers[senderId] = newClient
-
 				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s is online </span>`,
 					html.EscapeString(newClient.Name)))
 
-			case NEW_USER_WHO_WAS_ONLINE:
+			case shared.NEW_USER_WHO_WAS_ONLINE:
 				userName := string(msg.Payload.Contents)
-				newClient := Client{isOnline: true, Name: userName}
+				newClient := shared.Client{IsOnline: true, Name: userName}
 				clientState.userDataBase.ClientUsers[senderId] = newClient
 				clientState.recentChanges.Store(true)
-
 				broadcastToGUI(fmt.Sprintf(`<span class="sys">%s is a new user who was online before you</span>`,
 					html.EscapeString(userName)))
 
 			default:
 				panic("unknown opcode")
-
 			}
-
 		}
-
 	}
 }
 
-// senders a message to the server
 func sendMessage() {
-
 	encoder := gob.NewEncoder(clientState.clientConn)
-
-	clientState.senderChannel <- InternalMessageData{
-		OPcode:   DATA_MESSAGE,
+	clientState.senderChannel <- shared.InternalMessageData{
+		OPcode:   shared.DATA_MESSAGE,
 		Contents: []byte(clientState.userDataBase.ClientUsers[clientState.myID].Name),
 	}
-
 	for {
 		messageData, ok := <-clientState.senderChannel
-
-		// if the user sends a message
 		if ok {
-
 		}
-		message := Message{
+		message := shared.Message{
 			SenderId: clientState.myID,
 			Payload:  messageData,
 		}
-
-		// convert string pointer in message to real data
 		err := encoder.Encode(message)
-
 		if err != nil {
 			panic(err)
 		}
 	}
 }
 
-// periodically write to json
 func writeToClientSideJson() {
 	for {
 		time.Sleep(4 * time.Second)
-
 		recentChanges := clientState.recentChanges.Swap(false)
-
 		if recentChanges {
-			// Marshal back to JSON
 			updated, err := json.MarshalIndent(clientState.userDataBase, "", "  ")
 			if err != nil {
 				panic(err)
 			}
-
-			// Write back to file
-			//the 0644 is an octal code to specify permissions
-			err = os.WriteFile(filepath.Join(cfg.DataDir, "data.json"), updated, 0644)
-
+			err = os.WriteFile(filepath.Join(shared.Cfg.DataDir, "data.json"), updated, 0644)
 			if err != nil {
 				panic(err)
 			}
 		}
-
 	}
 }
 
 func initJSON() {
-	path := filepath.Join(cfg.DataDir, "data.json")
-
+	path := filepath.Join(shared.Cfg.DataDir, "data.json")
 	_, err := os.Stat(path)
+	clientState.userDataBase.ClientUsers = make(map[uint32]shared.Client)
 
-	//instantiate local database
-	clientState.userDataBase.ClientUsers = make(map[uint32]Client)
-
-	// If the file exists
 	if err == nil {
 		bytes, err := os.ReadFile(path)
 		if err != nil {
@@ -202,43 +155,31 @@ func initJSON() {
 		if err = json.Unmarshal(bytes, &clientState.userDataBase); err != nil {
 			log.Fatal(err)
 		}
-
-		// read in the user ID from index 0
 		tempID, err := strconv.Atoi(clientState.userDataBase.ClientUsers[0].Name)
 		clientState.myID = uint32(tempID)
+		_ = err
 
-		//we have finished reading our id in and we have everything locally, we are good
-
-		// IF the file does not exist
 	} else if errors.Is(err, os.ErrNotExist) {
 		file, err := os.Create(path)
 		if err != nil {
 			log.Fatal(err)
 		}
-
 		clientState.myID = rand.Uint32()
-
-		//right my id to index 0, for safe keeping when we close and save.
-		clientState.userDataBase.ClientUsers[0] = Client{
-			false,
-			strconv.Itoa(int(clientState.myID)),
+		clientState.userDataBase.ClientUsers[0] = shared.Client{
+			IsOnline: false,
+			Name:     strconv.Itoa(int(clientState.myID)),
 		}
 
 		var name string
-
 		println("What is your username")
-
 		_, err = fmt.Scanln(&name)
-
 		if err != nil {
 			panic(err)
 		}
-
-		clientState.userDataBase.ClientUsers[clientState.myID] = Client{
-			true,
-			name,
+		clientState.userDataBase.ClientUsers[clientState.myID] = shared.Client{
+			IsOnline: true,
+			Name:     name,
 		}
-
 		initial, err := json.MarshalIndent(clientState.userDataBase, "", "  ")
 		if err != nil {
 			panic(err)
@@ -253,23 +194,16 @@ func initJSON() {
 }
 
 func initClient() {
-
 	var err error
-
-	//Here we are reading in the user hashmap from disk while connecting to servers concurrently
 	initJSON()
-
-	clientState.senderChannel = make(chan InternalMessageData, 16)
-	clientState.receiverChannel = make(chan Message, 16)
-
+	clientState.senderChannel = make(chan shared.InternalMessageData, 16)
+	clientState.receiverChannel = make(chan shared.Message, 16)
 	for {
-		clientState.clientConn, err = net.Dial("tcp", port)
-
+		clientState.clientConn, err = net.Dial("tcp", shared.Port)
 		if err == nil {
 			break
 		}
 	}
-
 	initGUI()
 }
 
@@ -329,7 +263,7 @@ func initGUI() {
 		}
 		if text := r.FormValue("m"); text != "" {
 			myName := clientState.userDataBase.ClientUsers[clientState.myID].Name
-			clientState.senderChannel <- InternalMessageData{DATA_MESSAGE, []byte(text)}
+			clientState.senderChannel <- shared.InternalMessageData{OPcode: shared.DATA_MESSAGE, Contents: []byte(text)}
 			broadcastToGUI(fmt.Sprintf(`<span class="name">%s</span>: %s`,
 				html.EscapeString(myName),
 				html.EscapeString(text)))
@@ -337,7 +271,7 @@ func initGUI() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	addr := "localhost:" + cfg.GUIPort
+	addr := "localhost:" + shared.Cfg.GUIPort
 	log.Printf("Chat UI → http://%s", addr)
 	go func() {
 		if err := http.ListenAndServe(addr, mux); err != nil {
@@ -346,17 +280,13 @@ func initGUI() {
 	}()
 }
 
-func clientMain() {
-
+func Main() {
 	initClient()
-
-	// spawn all the relevant threads
 	go receiveMessage()
 	go sendMessage()
 	go receivedMessageManager()
 	go writeToClientSideJson()
-
-	select {} // goroutines handle everything; keep main alive
+	select {}
 }
 
 var (

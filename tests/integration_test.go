@@ -1,10 +1,10 @@
 //go:build integration
 
-// Run with: go test -tags integration -v -count=1 -timeout 120s
+// Run with: go test -tags integration -v -count=1 -timeout 120s TCPchat/tests
 // To attach a debugger, use GoLand's "Integration Tests" run configuration in debug mode.
 // The server binary is built with -gcflags="all=-N -l" so you can step into it.
 
-package main
+package tests
 
 import (
 	"fmt"
@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"TCPchat/internal/shared"
 )
 
 func TestMain(m *testing.M) {
@@ -33,7 +35,7 @@ func TestMain(m *testing.M) {
 		"-a",
 		"-gcflags", "all=-N -l",
 		"-o", testBin,
-		".",
+		"TCPchat/cmd/tcpchat",
 	).CombinedOutput()
 	if buildErr != nil {
 		panic("build failed:\n" + string(out) + "\n" + buildErr.Error())
@@ -57,8 +59,6 @@ func TestFirstConnect(t *testing.T) {
 }
 
 // TestNoDoublePrint verifies that a joining user triggers exactly one notification per observer.
-// This is a regression test for the double-print bug caused by perClientSender
-// encoding both the intro message and the original NEW_USER_ONLINE.
 func TestNoDoublePrint(t *testing.T) {
 	cleanup := spawnServer(t, t.TempDir())
 	defer cleanup()
@@ -97,11 +97,10 @@ func TestNamePropagation(t *testing.T) {
 	bob := connect(t, bobID, "bob")
 	defer bob.conn.Close()
 
-	// Alice receives NEW_USERNAME for Bob via perClientSender.
 	aliceMsgs := alice.drain(5, 2*time.Second)
 	var aliceGotName bool
 	for _, m := range aliceMsgs {
-		if m.SenderId == bobID && m.Payload.OPcode == NEW_USERNAME {
+		if m.SenderId == bobID && m.Payload.OPcode == shared.NEW_USERNAME {
 			got := string(m.Payload.Contents)
 			if got == "bob" {
 				aliceGotName = true
@@ -114,11 +113,10 @@ func TestNamePropagation(t *testing.T) {
 		t.Errorf("alice did not receive NEW_USERNAME for bob; got: %+v", aliceMsgs)
 	}
 
-	// Bob receives NEW_USER_WHO_WAS_ONLINE for Alice via handleConn's direct encoder.
 	bobMsgs := bob.drain(5, 2*time.Second)
 	var bobGotName bool
 	for _, m := range bobMsgs {
-		if m.SenderId == aliceID && m.Payload.OPcode == NEW_USER_WHO_WAS_ONLINE {
+		if m.SenderId == aliceID && m.Payload.OPcode == shared.NEW_USER_WHO_WAS_ONLINE {
 			got := string(m.Payload.Contents)
 			if got == "alice" {
 				bobGotName = true
@@ -134,10 +132,6 @@ func TestNamePropagation(t *testing.T) {
 
 // TestJSONPersistence verifies that friend-lists survive a server restart (EXISTING_USER),
 // and that deleting a user's JSON resets their view to NEW_USER_WHO_WAS_ONLINE.
-//
-// Note: Alice must connect first in session 1 so Bob's join goes through her perClientSender,
-// which is the only code path that sets recentChanges and triggers the JSON flush.
-// This test takes ~5 s for the JSON flush wait.
 func TestJSONPersistence(t *testing.T) {
 	dir := t.TempDir()
 
@@ -148,12 +142,11 @@ func TestJSONPersistence(t *testing.T) {
 	cleanup := spawnServer(t, dir)
 
 	alice := connect(t, aliceID, "alice")
-	alice.drain(5, 500*time.Millisecond) // first user; no messages expected
+	alice.drain(5, 500*time.Millisecond)
 
 	bob := connect(t, bobID, "bob")
-	bob.drain(5, 500*time.Millisecond) // drains NEW_USER_WHO_WAS_ONLINE for Alice
+	bob.drain(5, 500*time.Millisecond)
 
-	// Drain Alice's NEW_USERNAME for Bob so her perClientSender runs and sets recentChanges.
 	alice.drain(5, time.Second)
 
 	t.Log("waiting 5 s for JSON flush (writeToPerClientJson fires at ~4 s)...")
@@ -162,21 +155,20 @@ func TestJSONPersistence(t *testing.T) {
 	cleanup()
 	alice.conn.Close()
 	bob.conn.Close()
-	time.Sleep(200 * time.Millisecond) // let OS release the port
+	time.Sleep(200 * time.Millisecond)
 
 	// ── Session 2: Alice's JSON has Bob → she receives EXISTING_USER ───────
 	cleanup2 := spawnServer(t, dir)
 
 	bob2 := connect(t, bobID, "bob")
-	bob2.drain(5, 500*time.Millisecond) // no one online yet
+	bob2.drain(5, 500*time.Millisecond)
 
-	// Alice connects second; her JSON has Bob who is now online.
 	alice2 := connect(t, aliceID, "alice")
 	aliceMsgs2 := alice2.drain(5, 2*time.Second)
 
 	var gotExistingUser bool
 	for _, m := range aliceMsgs2 {
-		if m.SenderId == bobID && m.Payload.OPcode == EXISTING_USER {
+		if m.SenderId == bobID && m.Payload.OPcode == shared.EXISTING_USER {
 			gotExistingUser = true
 		}
 	}
@@ -202,13 +194,13 @@ func TestJSONPersistence(t *testing.T) {
 	defer bob3.conn.Close()
 	bob3.drain(5, 500*time.Millisecond)
 
-	alice3 := connect(t, aliceID, "alice") // fresh empty DB; Bob is online
+	alice3 := connect(t, aliceID, "alice")
 	defer alice3.conn.Close()
 	aliceMsgs3 := alice3.drain(5, 2*time.Second)
 
 	var gotWasOnline bool
 	for _, m := range aliceMsgs3 {
-		if m.SenderId == bobID && m.Payload.OPcode == NEW_USER_WHO_WAS_ONLINE {
+		if m.SenderId == bobID && m.Payload.OPcode == shared.NEW_USER_WHO_WAS_ONLINE {
 			gotWasOnline = true
 		}
 	}
@@ -228,7 +220,6 @@ func TestMessageOrdering(t *testing.T) {
 	bob := connect(t, rand.Uint32(), "bob")
 	defer bob.conn.Close()
 
-	// Drain initial notifications so channels are clear before sending test messages.
 	alice.drain(10, time.Second)
 	bob.drain(10, time.Second)
 	time.Sleep(100 * time.Millisecond)
@@ -243,7 +234,7 @@ func TestMessageOrdering(t *testing.T) {
 
 	var received []string
 	for _, m := range msgs {
-		if m.SenderId == alice.id && m.Payload.OPcode == DATA_MESSAGE {
+		if m.SenderId == alice.id && m.Payload.OPcode == shared.DATA_MESSAGE {
 			received = append(received, string(m.Payload.Contents))
 		}
 	}
@@ -296,7 +287,6 @@ func TestMediumScale(t *testing.T) {
 		u.drain(500, 100*time.Millisecond)
 	}
 
-	// Probe verifies the server is still alive and sends one message per online user.
 	probe := connect(t, rand.Uint32(), "probe")
 	defer probe.conn.Close()
 	probeStartMsgs := probe.drain(numUsers+5, 3*time.Second)

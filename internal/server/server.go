@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"encoding/gob"
@@ -12,70 +12,55 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"TCPchat/internal/shared"
 )
 
 type ClientInfo struct {
 	conn          net.Conn
 	userID        uint32
-	channel       chan Message
+	channel       chan shared.Message
 	isOnline      bool
 	recentChanges *atomic.Bool
-	UserName      string   `json:"name"`
-	UserDataBase  UserData `json:"-"`
+	UserName      string          `json:"name"`
+	UserDataBase  shared.UserData `json:"-"`
 }
+
 type ServerData struct {
 	ServerUsers map[uint32]ClientInfo `json:"users"`
 }
 
-// global hashmap for easy lookup of ids
 var serverUsers = ServerData{}
-
 var serverRecentChanges atomic.Bool
+var globalChannel chan shared.Message
 
-// channel for all serverUsers to push messages
-var globalChannel chan Message
-
-// This is a go routine that reads messages in and pushes them up to a big channel to be sent to everyone else
 func perClientReceiver(userId uint32, decoder *gob.Decoder) {
-
 	for {
-		// wait for a message on the other side of the network
-		var msg Message
+		var msg shared.Message
 		err := decoder.Decode(&msg)
-
 		if err != nil {
 			return
 		}
 
-		//		fmt.Printf("Server recieved messages: %+v \n", msg)
-
-		// allocate a space where the message can live
-		//This prevents the msg variable from being overwritten
 		contents := make([]byte, len(msg.Payload.Contents))
 		copy(contents, msg.Payload.Contents)
 
-		message := Message{
+		message := shared.Message{
 			SenderId: userId,
-			Payload: InternalMessageData{
+			Payload: shared.InternalMessageData{
 				OPcode:   msg.Payload.OPcode,
 				Contents: contents,
 			},
 		}
-
-		// push the message into the channel to be read
 		globalChannel <- message
 	}
 }
 
-// This is a per client function that
 func perClientSender(userId uint32, encoder *gob.Encoder) {
-
 	info := serverUsers.ServerUsers[userId]
 
 	for {
-		// receive a message
 		message := <-info.channel
-
 		senderID := message.SenderId
 
 		if senderID == userId {
@@ -86,40 +71,35 @@ func perClientSender(userId uint32, encoder *gob.Encoder) {
 
 		if !isInitialized {
 			senderName := serverUsers.ServerUsers[senderID].UserName
-
-			serverUsers.ServerUsers[userId].UserDataBase.ClientUsers[senderID] = Client{
-				isOnline: true,
+			serverUsers.ServerUsers[userId].UserDataBase.ClientUsers[senderID] = shared.Client{
+				IsOnline: true,
 				Name:     senderName,
 			}
 			info.recentChanges.Store(true)
 
-			serverMessage := Message{
+			serverMessage := shared.Message{
 				SenderId: senderID,
-				Payload: InternalMessageData{
-					OPcode:   NEW_USERNAME,
+				Payload: shared.InternalMessageData{
+					OPcode:   shared.NEW_USERNAME,
 					Contents: []byte(senderName),
 				},
 			}
-			fmt.Printf("%+v \n", serverMessage)
 			err := encoder.Encode(serverMessage)
-
 			if err != nil {
 				panic(err)
 			}
 			continue
 
-		} else if !client.isOnline {
-
-			serverMessage := Message{
+		} else if !client.IsOnline {
+			serverMessage := shared.Message{
 				SenderId: senderID,
-				Payload: InternalMessageData{
-					OPcode:   NEW_USER_ONLINE,
+				Payload: shared.InternalMessageData{
+					OPcode:   shared.NEW_USER_ONLINE,
 					Contents: nil,
 				},
 			}
 			fmt.Printf("Serverside message: %+v \n", serverMessage)
 			err := encoder.Encode(serverMessage)
-
 			if err != nil {
 				panic(err)
 			}
@@ -127,23 +107,16 @@ func perClientSender(userId uint32, encoder *gob.Encoder) {
 		}
 
 		err := encoder.Encode(message)
-
 		if err != nil {
 			panic(err)
 		}
-
-		// reset buffer
-
 	}
 }
 
-// Every login, read in the json to data
-func initializeServerSideClientJson(id uint32, database *UserData) {
-	fileName := filepath.Join(cfg.DataDir, "friendsList"+strconv.Itoa(int(id))+".json")
-
+func initializeServerSideClientJson(id uint32, database *shared.UserData) {
+	fileName := filepath.Join(shared.Cfg.DataDir, "friendsList"+strconv.Itoa(int(id))+".json")
 	_, err := os.Stat(fileName)
 
-	// If the file exists
 	if err == nil {
 		bytes, err := os.ReadFile(fileName)
 		if err != nil {
@@ -152,8 +125,6 @@ func initializeServerSideClientJson(id uint32, database *UserData) {
 		if err = json.Unmarshal(bytes, database); err != nil {
 			log.Fatal(err)
 		}
-
-		// IF the file does not exist
 	} else if errors.Is(err, os.ErrNotExist) {
 		initial, err := json.MarshalIndent(database, "", "  ")
 		if err != nil {
@@ -167,137 +138,99 @@ func initializeServerSideClientJson(id uint32, database *UserData) {
 	}
 }
 
-// handles a new connection to the server
 func handleConn(conn net.Conn) {
-
 	var clientInfo ClientInfo
-	var msg Message
+	var msg shared.Message
 	decoder := gob.NewDecoder(conn)
 	encoder := gob.NewEncoder(conn)
 
-	//read in the starter to data the client sends
 	err := decoder.Decode(&msg)
-
 	if err != nil {
 		return
 	}
 
-	fmt.Printf("firstMessage: %+v\n", msg)
-
 	clientInfo.userID = msg.SenderId
-
 	_, ok := serverUsers.ServerUsers[clientInfo.userID]
 
-	//initialize all the temporary client objects
 	clientInfo.conn = conn
 	clientInfo.recentChanges = new(atomic.Bool)
-	clientInfo.channel = make(chan Message, 16)
+	clientInfo.channel = make(chan shared.Message, 16)
 	clientInfo.isOnline = true
-	clientInfo.UserDataBase.ClientUsers = make(map[uint32]Client)
+	clientInfo.UserDataBase.ClientUsers = make(map[uint32]shared.Client)
 	clientInfo.UserName = string(msg.Payload.Contents)
 	initializeServerSideClientJson(clientInfo.userID, &clientInfo.UserDataBase)
 
-	// send back the current list of users
-	// this line has to be in this exact location, because we need the channel to exist, but we cannot be in the hashmap yet, so there is no race condtion
-	// this message will always be the first one recieved back
-	//they will not know we are online because we are not identified as online, and we will not know if they are online
-
+	// Send the current online user list before registering ourselves, so there
+	// is no race between our channel existing and us appearing in the map.
 	for key, value := range serverUsers.ServerUsers {
 		if value.isOnline {
-
-			var msg Message
+			var m shared.Message
 			_, knownUser := clientInfo.UserDataBase.ClientUsers[key]
 
 			if knownUser {
-				msg = Message{
+				m = shared.Message{
 					SenderId: key,
-					Payload: InternalMessageData{
-						OPcode:   EXISTING_USER,
+					Payload: shared.InternalMessageData{
+						OPcode:   shared.EXISTING_USER,
 						Contents: nil,
 					},
 				}
-
-				newClient := Client{
-					isOnline: true,
+				clientInfo.UserDataBase.ClientUsers[key] = shared.Client{
+					IsOnline: true,
 					Name:     value.UserName,
 				}
-
-				clientInfo.UserDataBase.ClientUsers[key] = newClient
-
 			} else {
 				name := value.UserName
-
-				newClient := Client{
-					isOnline: true,
+				clientInfo.UserDataBase.ClientUsers[key] = shared.Client{
+					IsOnline: true,
 					Name:     name,
 				}
-
-				clientInfo.UserDataBase.ClientUsers[key] = newClient
-
-				msg = Message{
+				m = shared.Message{
 					SenderId: key,
-					Payload: InternalMessageData{
-						OPcode:   NEW_USER_WHO_WAS_ONLINE,
+					Payload: shared.InternalMessageData{
+						OPcode:   shared.NEW_USER_WHO_WAS_ONLINE,
 						Contents: []byte(name),
 					},
 				}
 			}
-			err := encoder.Encode(msg)
+			err := encoder.Encode(m)
 			if err != nil {
 				panic(err)
 			}
 		}
 	}
 
-	// This line has to be here because if this line was after us and we were a new user, nobody would know our name
 	serverUsers.ServerUsers[clientInfo.userID] = clientInfo
 
-	// send a message to everyone of our id, they will internally check if the know us
-	initialMessage := Message{
+	initialMessage := shared.Message{
 		SenderId: clientInfo.userID,
-		Payload: InternalMessageData{
-			OPcode:   NEW_USER_ONLINE,
+		Payload: shared.InternalMessageData{
+			OPcode:   shared.NEW_USER_ONLINE,
 			Contents: nil,
 		},
 	}
 	globalChannel <- initialMessage
 
-	// send a message back of all the current users ids->name
-
 	if !ok {
 		serverRecentChanges.Store(true)
 	}
 
-	// now that the thread is initialized, we can launch the two new goroutines and exit
 	go perClientSender(clientInfo.userID, encoder)
 	go perClientReceiver(clientInfo.userID, decoder)
 	go writeToPerClientJson(clientInfo.userID)
 }
 
-// Constantly listens for new users, and initializes them
-
 func newUserListener(ln net.Listener) {
-
-	// FUTURE projects (rate limiter)
 	for {
 		conn, err := ln.Accept()
-
 		if err != nil {
-			// assume an error mean the server is over
 			panic(err)
 		}
-
 		go handleConn(conn)
-
 	}
 }
 
-// Sends a message to everyone whether they are online or not
-func sendMessageToEveryOne(message Message) {
-
-	// iterate through every channel and push the message for their own go routines to handle
-	// we do not care about resending the message to sender
-	// it actually works in our favor as a form of acknowledgment
+func sendMessageToEveryOne(message shared.Message) {
 	for _, value := range serverUsers.ServerUsers {
 		value.channel <- message
 	}
@@ -306,16 +239,13 @@ func sendMessageToEveryOne(message Message) {
 func writeToPerClientJson(userId uint32) {
 	for {
 		time.Sleep(4 * time.Second)
-
 		recentChanges := serverUsers.ServerUsers[userId].recentChanges.Swap(false)
-
 		if recentChanges {
 			updated, err := json.MarshalIndent(serverUsers.ServerUsers[userId].UserDataBase, "", "  ")
 			if err != nil {
 				panic(err)
 			}
-
-			fileName := filepath.Join(cfg.DataDir, "friendsList"+strconv.Itoa(int(userId))+".json")
+			fileName := filepath.Join(shared.Cfg.DataDir, "friendsList"+strconv.Itoa(int(userId))+".json")
 			err = os.WriteFile(fileName, updated, 0644)
 			if err != nil {
 				panic(err)
@@ -327,16 +257,13 @@ func writeToPerClientJson(userId uint32) {
 func writeToServerJson() {
 	for {
 		time.Sleep(4 * time.Second)
-
 		recentChanges := serverRecentChanges.Swap(false)
-
 		if recentChanges {
 			updated, err := json.MarshalIndent(serverUsers, "", "  ")
 			if err != nil {
 				panic(err)
 			}
-
-			err = os.WriteFile(filepath.Join(cfg.DataDir, "data.json"), updated, 0644)
+			err = os.WriteFile(filepath.Join(shared.Cfg.DataDir, "data.json"), updated, 0644)
 			if err != nil {
 				panic(err)
 			}
@@ -345,13 +272,10 @@ func writeToServerJson() {
 }
 
 func initServerJSON() {
-	path := filepath.Join(cfg.DataDir, "data.json")
+	path := filepath.Join(shared.Cfg.DataDir, "data.json")
 	_, err := os.Stat(path)
-
-	//instantiate local database
 	serverUsers.ServerUsers = make(map[uint32]ClientInfo)
 
-	// If the file exists
 	if err == nil {
 		bytes, err := os.ReadFile(path)
 		if err != nil {
@@ -360,8 +284,6 @@ func initServerJSON() {
 		if err = json.Unmarshal(bytes, &serverUsers); err != nil {
 			log.Fatal(err)
 		}
-
-		// IF the file does not exist
 	} else if errors.Is(err, os.ErrNotExist) {
 		initial, err := json.MarshalIndent(serverUsers, "", "  ")
 		if err != nil {
@@ -375,32 +297,22 @@ func initServerJSON() {
 	}
 }
 
-// This function is the main orchestrator of the server
-func serverMain() {
-
-	globalChannel = make(chan Message, 128)
-
+func Main() {
+	globalChannel = make(chan shared.Message, 128)
 	initServerJSON()
-
 	go writeToServerJson()
 
-	ln, err := net.Listen("tcp", port)
-
+	ln, err := net.Listen("tcp", shared.Port)
 	if err != nil {
 		panic(err)
 	}
 
-	// initialize all new users
 	go newUserListener(ln)
 
 	for {
-		// pull messages off the channel, then send it to everyone in existence
 		message, ok := <-globalChannel
-
 		if ok {
-			fmt.Printf("Global Channel: %+v \n", message)
 			sendMessageToEveryOne(message)
 		}
 	}
-
 }

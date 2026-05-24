@@ -1,0 +1,18 @@
+# Build outputs
+*.exe
+*.exe~
+
+# pprof output
+profiles/*.prof
+profiles/*.out
+*.prof
+*.out
+
+# Claude Code working directory
+.claude/
+
+# Runtime data directories
+run/
+
+# Temp files
+*.tmp
